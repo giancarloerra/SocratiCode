@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/giancarloerra-socraticode-badge.png)](https://mseep.ai/app/giancarloerra-socraticode)
+
 <p align="center">
   <img src="./socraticode_logo_thumbnail.png" alt="SocratiCode logo" />
 </p>
