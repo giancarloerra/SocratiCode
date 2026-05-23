@@ -33,7 +33,13 @@ describe("embedding-provider", () => {
   });
 
   describe("factory", () => {
-    it("defaults to OllamaEmbeddingProvider", async () => {
+    it("defaults to TextEmbedderEmbeddingProvider", async () => {
+      const provider = await getEmbeddingProvider();
+      expect(provider.name).toBe("textembedder");
+    });
+
+    it("creates OllamaEmbeddingProvider when configured", async () => {
+      process.env.EMBEDDING_PROVIDER = "ollama";
       const provider = await getEmbeddingProvider();
       expect(provider.name).toBe("ollama");
     });
@@ -75,7 +81,7 @@ describe("embedding-provider", () => {
 
     it("recreates provider when config changes", async () => {
       const p1 = await getEmbeddingProvider();
-      expect(p1.name).toBe("ollama");
+      expect(p1.name).toBe("textembedder");
 
       resetEmbeddingConfig();
       resetEmbeddingProvider();

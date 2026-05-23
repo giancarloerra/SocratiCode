@@ -4,7 +4,11 @@
  * Embedding provider configuration — loaded from environment variables (MCP config).
  *
  * EMBEDDING_PROVIDER:
- *   - "ollama" (default): Use Ollama for embeddings (Docker or external).
+ *   - "textembedder" (default): Use the deterministic text-embedder Go binary
+ *                 (Landmark Lattice v1). Zero dependencies, bit-perfect,
+ *                 768-dim int32 vectors. The binary is spawned automatically
+ *                 or you can run it externally and set TEXTEMBEDDER_URL.
+ *   - "ollama": Use Ollama for embeddings (Docker or external).
  *   - "openai": Use OpenAI Embeddings API. Requires OPENAI_API_KEY.
  *   - "google": Use Google Generative AI Embedding API. Requires GOOGLE_API_KEY.
  *   - "lmstudio": Use a local LM Studio server (OpenAI-compatible). Requires
@@ -13,6 +17,13 @@
  *                100+ underlying providers). Requires LITELLM_API_KEY,
  *                EMBEDDING_MODEL (must match an alias in the proxy's config.yaml),
  *                and EMBEDDING_DIMENSIONS (the alias's underlying dim).
+ *
+ * Text-Embedder-specific:
+ *   TEXTEMBEDDER_URL:      HTTP URL of an external text-embedder instance.
+ *                          When set, the provider skips spawning a local binary.
+ *   TEXTEMBEDDER_BIN_PATH: Path to the text-embedder binary.
+ *                          Default: <cwd>/text-embedder
+ *   TEXTEMBEDDER_PORT:     Port for the subprocess (default: 8089).
  *
  * Ollama-specific:
  *   OLLAMA_MODE:
@@ -61,7 +72,7 @@ import { logger } from "./logger.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
-export type EmbeddingProvider = "ollama" | "openai" | "google" | "lmstudio" | "litellm";
+export type EmbeddingProvider = "textembedder" | "ollama" | "openai" | "google" | "lmstudio" | "litellm";
 export type OllamaMode = "docker" | "external" | "auto";
 
 export interface EmbeddingConfig {
@@ -91,11 +102,12 @@ export interface EmbeddingConfig {
  * selected without explicit EMBEDDING_MODEL / EMBEDDING_DIMENSIONS.
  */
 const PROVIDER_DEFAULTS: Record<EmbeddingProvider, { model: string; dimensions: number }> = {
-  ollama:   { model: "nomic-embed-text",        dimensions: 768  },
-  openai:   { model: "text-embedding-3-small",  dimensions: 1536 },
-  google:   { model: "gemini-embedding-001",    dimensions: 3072 },
-  lmstudio: { model: "",                        dimensions: 0    },
-  litellm:  { model: "",                        dimensions: 0    },
+  textembedder: { model: "landmark-lattice-v1", dimensions: 768  },
+  ollama:       { model: "nomic-embed-text",        dimensions: 768  },
+  openai:       { model: "text-embedding-3-small",  dimensions: 1536 },
+  google:       { model: "gemini-embedding-001",    dimensions: 3072 },
+  lmstudio:     { model: "",                        dimensions: 0    },
+  litellm:      { model: "",                        dimensions: 0    },
 };
 
 // ── Ollama mode defaults ──────────────────────────────────────────────────
@@ -114,6 +126,8 @@ const MODE_DEFAULTS: Record<OllamaMode, { url: string }> = {
  * and to stay within cloud provider limits.
  */
 const MODEL_CONTEXT_LENGTHS: Record<string, number> = {
+  // Text-Embedder (Landmark Lattice — no real context limit, use generous default)
+  "landmark-lattice-v1": 8192,
   // Ollama models
   "nomic-embed-text": 2048,
   "mxbai-embed-large": 512,
@@ -145,8 +159,9 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
   if (_config) return _config;
 
   // ── Provider ────────────────────────────────────────────────────────
-  const rawProvider = process.env.EMBEDDING_PROVIDER || "ollama";
+  const rawProvider = process.env.EMBEDDING_PROVIDER || "textembedder";
   if (
+    rawProvider !== "textembedder" &&
     rawProvider !== "ollama" &&
     rawProvider !== "openai" &&
     rawProvider !== "google" &&
@@ -154,7 +169,7 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
     rawProvider !== "litellm"
   ) {
     throw new Error(
-      `Invalid EMBEDDING_PROVIDER: "${rawProvider}". Must be "ollama", "openai", "google", "lmstudio", or "litellm".`,
+      `Invalid EMBEDDING_PROVIDER: "${rawProvider}". Must be "textembedder", "ollama", "openai", "google", "lmstudio", or "litellm".`,
     );
   }
   const embeddingProvider: EmbeddingProvider = rawProvider;
@@ -274,17 +289,19 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
     embeddingModel: _config.embeddingModel,
     embeddingDimensions: _config.embeddingDimensions,
     embeddingContextLength: _config.embeddingContextLength || "auto",
-    hasApiKey: !!(embeddingProvider === "ollama"
-      ? _config.ollamaApiKey
-      : embeddingProvider === "openai"
-        ? process.env.OPENAI_API_KEY
-        : embeddingProvider === "google"
-          ? process.env.GOOGLE_API_KEY
-          : embeddingProvider === "lmstudio"
-            ? process.env.LMSTUDIO_API_KEY
-            : embeddingProvider === "litellm"
-              ? process.env.LITELLM_API_KEY
-              : undefined),
+    hasApiKey: !!(embeddingProvider === "textembedder"
+      ? true // binary / external URL; no key needed
+      : embeddingProvider === "ollama"
+        ? _config.ollamaApiKey
+        : embeddingProvider === "openai"
+          ? process.env.OPENAI_API_KEY
+          : embeddingProvider === "google"
+            ? process.env.GOOGLE_API_KEY
+            : embeddingProvider === "lmstudio"
+              ? process.env.LMSTUDIO_API_KEY
+              : embeddingProvider === "litellm"
+                ? process.env.LITELLM_API_KEY
+                : undefined),
   });
 
   return _config;

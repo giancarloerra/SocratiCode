@@ -36,24 +36,14 @@ describe("embedding-config", () => {
   });
 
   describe("defaults (no env vars)", () => {
-    it("defaults to ollama provider", () => {
+    it("defaults to textembedder provider", () => {
       const config = loadEmbeddingConfig();
-      expect(config.embeddingProvider).toBe("ollama");
+      expect(config.embeddingProvider).toBe("textembedder");
     });
 
-    it("defaults to auto mode", () => {
+    it("defaults model to landmark-lattice-v1", () => {
       const config = loadEmbeddingConfig();
-      expect(config.ollamaMode).toBe("auto");
-    });
-
-    it("defaults URL to localhost:11434 in auto mode", () => {
-      const config = loadEmbeddingConfig();
-      expect(config.ollamaUrl).toBe("http://localhost:11434");
-    });
-
-    it("defaults model to nomic-embed-text", () => {
-      const config = loadEmbeddingConfig();
-      expect(config.embeddingModel).toBe("nomic-embed-text");
+      expect(config.embeddingModel).toBe("landmark-lattice-v1");
     });
 
     it("defaults dimensions to 768", () => {
@@ -61,7 +51,7 @@ describe("embedding-config", () => {
       expect(config.embeddingDimensions).toBe(768);
     });
 
-    it("has no API key by default", () => {
+    it("has no Ollama API key by default", () => {
       const config = loadEmbeddingConfig();
       expect(config.ollamaApiKey).toBeUndefined();
     });
@@ -145,11 +135,12 @@ describe("embedding-config", () => {
   describe("singleton behavior", () => {
     it("caches config after first load", () => {
       const first = loadEmbeddingConfig();
+      expect(first.embeddingProvider).toBe("textembedder");
       // Change env — should NOT affect cached config
-      process.env.OLLAMA_MODE = "external";
+      process.env.EMBEDDING_PROVIDER = "google";
       const second = loadEmbeddingConfig();
       expect(second).toBe(first); // same reference
-      expect(second.ollamaMode).toBe("auto");
+      expect(second.embeddingProvider).toBe("textembedder");
     });
 
     it("getEmbeddingConfig returns same as loadEmbeddingConfig", () => {
@@ -160,18 +151,19 @@ describe("embedding-config", () => {
 
     it("resetEmbeddingConfig clears cache", () => {
       const first = loadEmbeddingConfig();
-      expect(first.ollamaMode).toBe("auto");
+      expect(first.embeddingProvider).toBe("textembedder");
 
       resetEmbeddingConfig();
-      process.env.OLLAMA_MODE = "external";
+      process.env.EMBEDDING_PROVIDER = "google";
       const second = loadEmbeddingConfig();
-      expect(second.ollamaMode).toBe("external");
+      expect(second.embeddingProvider).toBe("google");
       expect(second).not.toBe(first);
     });
   });
 
   describe("full external config", () => {
     it("handles complete external config with all options", () => {
+      process.env.EMBEDDING_PROVIDER = "ollama";
       process.env.OLLAMA_MODE = "external";
       process.env.OLLAMA_URL = "http://remote-gpu:11434";
       process.env.EMBEDDING_MODEL = "mxbai-embed-large";
@@ -194,10 +186,10 @@ describe("embedding-config", () => {
   });
 
   describe("embedding provider selection", () => {
-    it("defaults to ollama when EMBEDDING_PROVIDER is not set", () => {
+    it("defaults to textembedder when EMBEDDING_PROVIDER is not set", () => {
       const config = loadEmbeddingConfig();
-      expect(config.embeddingProvider).toBe("ollama");
-      expect(config.embeddingModel).toBe("nomic-embed-text");
+      expect(config.embeddingProvider).toBe("textembedder");
+      expect(config.embeddingModel).toBe("landmark-lattice-v1");
       expect(config.embeddingDimensions).toBe(768);
     });
 
@@ -222,7 +214,7 @@ describe("embedding-config", () => {
     it("throws for invalid EMBEDDING_PROVIDER", () => {
       process.env.EMBEDDING_PROVIDER = "anthropic";
       expect(() => loadEmbeddingConfig()).toThrow(
-        'Invalid EMBEDDING_PROVIDER: "anthropic". Must be "ollama", "openai", "google", "lmstudio", or "litellm".',
+        'Invalid EMBEDDING_PROVIDER: "anthropic". Must be "textembedder", "ollama", "openai", "google", "lmstudio", or "litellm".',
       );
     });
 

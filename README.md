@@ -242,7 +242,7 @@ On VS Code's 2.45M‑line codebase, SocratiCode answers architectural questions 
 - **Hybrid code search** — Built on Qdrant, a purpose-built vector database with HNSW indexing, concurrent read/write, and payload filtering. Each chunk stores both a dense vector and a BM25 sparse vector; the Query API runs both sub-queries in a single round-trip and fuses results with Reciprocal Rank Fusion (RRF). Semantic search handles conceptual queries like "authentication middleware" even when those exact words don't appear in the code. BM25 handles exact identifier and keyword lookups. You get the best of both in every query with no tuning required.
 - **Configurable Qdrant** — Use the built-in Docker Qdrant (default, zero config) or connect to your own instance (self-hosted, remote server, or Qdrant Cloud). Configure via `QDRANT_MODE`, `QDRANT_URL`, and `QDRANT_API_KEY` environment variables.
 - **Configurable Ollama** — Use the built-in Docker Ollama (default, zero config) or point to your own Ollama instance (native install -GPU access-, remote server, etc.). Configure via `OLLAMA_MODE`, `OLLAMA_URL`, `EMBEDDING_MODEL` and `EMBEDDING_DIMENSIONS` environment variables.
-- **Multi-provider embeddings** — Switch between Local Ollama (private, GPU access), Docker Ollama (zero-config), OpenAI (`text-embedding-3-small`, fastest), Google Gemini (`gemini-embedding-001`, free tier), LM Studio (local OpenAI-compatible server), or LiteLLM (proxy gateway in front of 100+ providers) with a single environment variable. No provider-specific configuration files.
+- **Multi-provider embeddings** — Switch between Text Embedder (deterministic Go binary, default, zero-dependency), Local Ollama (private, GPU access), Docker Ollama (zero-config), OpenAI (`text-embedding-3-small`, fastest), Google Gemini (`gemini-embedding-001`, free tier), LM Studio (local OpenAI-compatible server), or LiteLLM (proxy gateway in front of 100+ providers) with a single environment variable. No provider-specific configuration files.
 - **Private & secure** — Everything runs on your machine — your code never leaves your network. The default Docker setup includes Ollama (embeddings) and Qdrant (vector storage) with no external API calls. No API costs, no token limits. Suitable for air-gapped and on-premises environments. Optional cloud providers (OpenAI, Google Gemini, Qdrant Cloud) are available but never required.
 - **AST-aware chunking** — Files are split at function/class boundaries using AST parsing (ast-grep), not arbitrary line counts. This produces higher-quality search results. Falls back to line-based chunking for unsupported languages.
 - **Polyglot code dependency graph** — Static analysis of import/require/use/include statements using ast-grep for 18+ languages. No external tools like dependency-cruiser required. Detects circular dependencies and generates visual Mermaid diagrams.
@@ -1154,7 +1154,7 @@ The rest of this section documents the variables themselves. Pass them using whi
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EMBEDDING_PROVIDER` | `ollama` | Embedding backend: `ollama` (local, default), `openai`, `google`, `lmstudio`, or `litellm` |
+| `EMBEDDING_PROVIDER` | `textembedder` | Embedding backend: `textembedder` (deterministic Go binary, default, no Docker/GPU needed), `ollama` (local), `openai`, `google`, `lmstudio`, or `litellm` |
 | `EMBEDDING_MODEL` | *(per provider)* | Model name. Defaults: `nomic-embed-text` (ollama), `text-embedding-3-small` (openai), `gemini-embedding-001` (google). **Required** for `lmstudio` and `litellm` (no default). |
 | `EMBEDDING_DIMENSIONS` | *(per provider)* | Vector dimensions. Defaults: `768` (ollama), `1536` (openai), `3072` (google). **Required** for `lmstudio` and `litellm` (no default; varies per loaded model / proxy alias). |
 | `EMBEDDING_CONTEXT_LENGTH` | *(auto-detected)* | Model context window in tokens. Auto-detected for known model names (works for LiteLLM aliases that match the underlying model name). Set manually for custom LM Studio models or arbitrary LiteLLM aliases. |
@@ -1190,6 +1190,23 @@ The rest of this section documents the variables themselves. Pass them using whi
 | `LITELLM_URL` | `http://localhost:4000/v1` | Full base URL of the LiteLLM proxy's OpenAI-compatible endpoint. Override for non-default ports or remote proxies (e.g. `https://litellm.internal:4001/v1`). Must include the `/v1` suffix — LiteLLM exposes `/v1/embeddings` under that prefix. |
 | `LITELLM_API_KEY` | *(none)* | **Required.** Master key (`general_settings.master_key` in the proxy's `config.yaml`) or a virtual key issued via LiteLLM's `/key/generate` endpoint. Unlike LM Studio, LiteLLM always authenticates — `/v1/models` itself is gated. |
 | `LITELLM_SEND_DIMENSIONS` | `false` | Opt-in (`true` / `1` / `yes`). Forwards the OpenAI-style `dimensions` parameter through the proxy. Safe only for Matryoshka-aware backends (`text-embedding-3-*`, `voyage-3`); other backends (BGE, `nomic-embed-text`, Cohere v3) reject the request. Leave unset unless you know your alias resolves to a Matryoshka model. |
+
+### Text-Embedder Configuration (when `EMBEDDING_PROVIDER=textembedder`)
+
+The default embedding provider. Uses a deterministic Go binary (`text-embedder`) that produces bit-identical 768-dim vectors — no Docker, no GPU, no API keys, no network calls. The binary is distributed in gzip form (`text-embedder-*.gz`) and auto-extracted on first use.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TEXTEMBEDDER_BIN_PATH` | *(none)* | Absolute path to an already-decompressed `text-embedder` binary. Useful when you manage the binary yourself or the auto-discovery fails. |
+| `TEXTEMBEDDER_URL` | *(none)* | When set, skips binary management entirely and connects to an externally running instance (e.g. `http://localhost:8089`). Useful for sharing one instance across multiple MCP hosts. |
+| `TEXTEMBEDDER_PORT` | `8089` | Port the binary listens on when spawned as a subprocess. |
+
+**Platform binaries:**
+- `text-embedder-linux.gz` — linux/amd64
+- `text-embedder-darwin.gz` — darwin/arm64 (Apple Silicon)
+- `text-embedder-win.gz` — windows/amd64
+
+The provider selects the correct binary based on `process.platform`. To generate them, run `make deploy-all` from the [`text-embedder`](https://github.com/guiperry/text-embedder) directory.
 
 ### Qdrant Configuration
 

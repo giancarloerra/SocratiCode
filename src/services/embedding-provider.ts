@@ -8,7 +8,8 @@
  * about which backend generates the vectors.
  *
  * Providers:
- *   - ollama   (default) — local Ollama (Docker or external)
+ *   - textembedder (default) — deterministic Go binary (zero deps, bit-perfect)
+ *   - ollama   — local Ollama (Docker or external)
  *   - openai   — OpenAI Embeddings API (text-embedding-3-small, etc.)
  *   - google   — Google Generative AI Embedding API (gemini-embedding-001, etc.)
  *   - lmstudio — local LM Studio server via OpenAI-compatible API
@@ -46,6 +47,11 @@ export async function getEmbeddingProvider(onProgress?: InfraProgressCallback): 
   logger.info("Initializing embedding provider", { provider: name });
 
   switch (name) {
+    case "textembedder": {
+      const { TextEmbedderEmbeddingProvider } = await import("./provider-textembedder.js");
+      _provider = new TextEmbedderEmbeddingProvider();
+      break;
+    }
     case "ollama": {
       // Dynamic imports avoid loading all provider SDKs at startup.
       const { OllamaEmbeddingProvider } = await import("./provider-ollama.js");
@@ -74,7 +80,7 @@ export async function getEmbeddingProvider(onProgress?: InfraProgressCallback): 
     }
     default:
       throw new Error(
-        `Unknown embedding provider: "${name}". Must be "ollama", "openai", "google", "lmstudio", or "litellm".`,
+        `Unknown embedding provider: "${name}". Must be "textembedder", "ollama", "openai", "google", "lmstudio", or "litellm".`,
       );
   }
 
