@@ -799,7 +799,7 @@ describe("graph-resolution", () => {
         "internal/helper.go": "",
         "internal/util.go": "",
       });
-      const goInfo = buildGoModuleInfo(project.fileSet, project.root);
+      const goInfo = buildGoModuleInfo(project.fileSet, project.root)[0];
       expect(goInfo).not.toBeNull();
 
       const result = resolveImport(
@@ -826,7 +826,7 @@ describe("graph-resolution", () => {
         "doc.go": "",
         "internal/helper.go": "",
       });
-      const goInfo = buildGoModuleInfo(project.fileSet, project.root);
+      const goInfo = buildGoModuleInfo(project.fileSet, project.root)[0];
 
       const result = resolveImport(
         "example.com/myapp",
@@ -848,7 +848,7 @@ describe("graph-resolution", () => {
         "go.mod": "module example.com/myapp\n\ngo 1.21\n",
         "main.go": "",
       });
-      const goInfo = buildGoModuleInfo(project.fileSet, project.root);
+      const goInfo = buildGoModuleInfo(project.fileSet, project.root)[0];
 
       const result = resolveImport(
         "github.com/spf13/cobra",
@@ -865,25 +865,25 @@ describe("graph-resolution", () => {
       expect(result).toBeNull();
     });
 
-    it("returns null when go.mod is missing", () => {
+    it("returns an empty array when go.mod is missing", () => {
       project = createTempProject({
         "main.go": "",
       });
       const goInfo = buildGoModuleInfo(project.fileSet, project.root);
 
-      // No go.mod → buildGoModuleInfo returns null → resolver returns null
+      // No go.mod → buildGoModuleInfo returns [] → resolver returns null
       // for any Go import.
-      expect(goInfo).toBeNull();
+      expect(goInfo).toEqual([]);
     });
 
-    it("returns null when go.mod has no module directive", () => {
+    it("returns an empty array when go.mod has no module directive", () => {
       project = createTempProject({
         "go.mod": "go 1.21\n",
         "main.go": "",
       });
       const goInfo = buildGoModuleInfo(project.fileSet, project.root);
 
-      expect(goInfo).toBeNull();
+      expect(goInfo).toEqual([]);
     });
 
     it("excludes _test.go files from representative selection", () => {
@@ -896,7 +896,7 @@ describe("graph-resolution", () => {
         "service/foo_test.go": "",
         "main.go": "",
       });
-      const goInfo = buildGoModuleInfo(project.fileSet, project.root);
+      const goInfo = buildGoModuleInfo(project.fileSet, project.root)[0];
 
       const result = resolveImport(
         "example.com/myapp/service",
@@ -921,7 +921,7 @@ describe("graph-resolution", () => {
         "pkg/middle.go": "",
         "main.go": "",
       });
-      const goInfo = buildGoModuleInfo(project.fileSet, project.root);
+      const goInfo = buildGoModuleInfo(project.fileSet, project.root)[0];
 
       const result = resolveImport(
         "example.com/myapp/pkg",
@@ -949,7 +949,7 @@ describe("graph-resolution", () => {
         "main.go": "",
         "internal/foo.go": "",
       });
-      const goInfo = buildGoModuleInfo(project.fileSet, project.root);
+      const goInfo = buildGoModuleInfo(project.fileSet, project.root)[0];
 
       const result = resolveImport(
         "golang.org/x/custom/internal",
@@ -975,7 +975,7 @@ describe("graph-resolution", () => {
         "pkg/foo.go": "",
         "main.go": "",
       });
-      const goInfo = buildGoModuleInfo(project.fileSet, project.root);
+      const goInfo = buildGoModuleInfo(project.fileSet, project.root)[0];
 
       const result = resolveImport(
         "example.com/myapp-other/pkg",
@@ -1002,7 +1002,7 @@ describe("graph-resolution", () => {
         "internal/util.go": "",
       });
 
-      const goInfo = buildGoModuleInfo(project.fileSet, project.root);
+      const goInfo = buildGoModuleInfo(project.fileSet, project.root)[0];
 
       expect(goInfo).not.toBeNull();
       expect(goInfo?.modulePath).toBe("example.com/myapp");
@@ -1018,22 +1018,22 @@ describe("graph-resolution", () => {
         "main.go": "",
       });
 
-      const goInfo = buildGoModuleInfo(project.fileSet, project.root);
+      const goInfo = buildGoModuleInfo(project.fileSet, project.root)[0];
 
       expect(goInfo?.modulePath).toBe("github.com/user/repo");
     });
 
-    it("returns null when go.mod is missing", () => {
+    it("returns an empty array when go.mod is missing", () => {
       project = createTempProject({
         "main.go": "",
       });
 
       const goInfo = buildGoModuleInfo(project.fileSet, project.root);
 
-      expect(goInfo).toBeNull();
+      expect(goInfo).toEqual([]);
     });
 
-    it("returns null when go.mod has no module directive", () => {
+    it("returns an empty array when go.mod has no module directive", () => {
       project = createTempProject({
         "go.mod": "// no module line\ngo 1.21\n",
         "main.go": "",
@@ -1041,7 +1041,7 @@ describe("graph-resolution", () => {
 
       const goInfo = buildGoModuleInfo(project.fileSet, project.root);
 
-      expect(goInfo).toBeNull();
+      expect(goInfo).toEqual([]);
     });
 
     it("excludes _test.go files from the package map representatives", () => {
@@ -1051,7 +1051,7 @@ describe("graph-resolution", () => {
         "service/foo.go": "",
       });
 
-      const goInfo = buildGoModuleInfo(project.fileSet, project.root);
+      const goInfo = buildGoModuleInfo(project.fileSet, project.root)[0];
 
       expect(goInfo?.packageMap.get("service")).toBe("service/foo.go");
     });
@@ -1063,7 +1063,7 @@ describe("graph-resolution", () => {
         "main.go": "",
       });
 
-      const goInfo = buildGoModuleInfo(project.fileSet, project.root);
+      const goInfo = buildGoModuleInfo(project.fileSet, project.root)[0];
 
       // Map has "." (for main.go) but no "internal" entry, because the
       // only file there is a test file.
@@ -1083,7 +1083,7 @@ describe("graph-resolution", () => {
         "pkg/subpkg/file.go": "",
       });
 
-      const goInfo = buildGoModuleInfo(project.fileSet, project.root);
+      const goInfo = buildGoModuleInfo(project.fileSet, project.root)[0];
 
       expect(goInfo?.packageMap.has("pkg/subpkg")).toBe(true);
       expect(goInfo?.packageMap.get("pkg/subpkg")).toBe("pkg/subpkg/file.go");
@@ -1095,7 +1095,7 @@ describe("graph-resolution", () => {
         "pkg/subpkg/file.go": "",
         "main.go": "",
       });
-      const goInfo = buildGoModuleInfo(project.fileSet, project.root);
+      const goInfo = buildGoModuleInfo(project.fileSet, project.root)[0];
 
       const result = resolveImport(
         "example.com/myapp/pkg/subpkg",
@@ -1110,6 +1110,146 @@ describe("graph-resolution", () => {
       );
 
       expect(result).toBe("pkg/subpkg/file.go");
+    });
+  });
+
+  // ── Nested go.mod (monorepo, issue #82) ───────────────────────────────
+  describe("Go resolution with nested go.mod (monorepo, #82)", () => {
+    it("discovers a nested go.mod and resolves imports against it", () => {
+      // go.mod lives in `backend/`, not at the indexed root. Imports are
+      // rooted at the module path and must be offset by the module's own
+      // subdirectory before the file lookup.
+      project = createTempProject({
+        "backend/go.mod": "module github.com/example/myapp-backend\n\ngo 1.22\n",
+        "backend/cmd/server/main.go": "",
+        "backend/internal/middleware/auth.go": "",
+        "backend/internal/service/user.go": "",
+        "frontend/src/app.ts": "",
+      });
+      const goModules = buildGoModuleInfo(project.fileSet, project.root);
+      expect(goModules.length).toBe(1);
+      expect(goModules[0].moduleDir).toBe("backend");
+      expect(goModules[0].modulePath).toBe("github.com/example/myapp-backend");
+
+      const result = resolveImport(
+        "github.com/example/myapp-backend/internal/middleware",
+        path.join(project.root, "backend/cmd/server/main.go"),
+        project.root,
+        project.fileSet,
+        "go",
+        undefined,
+        undefined,
+        undefined,
+        goModules,
+      );
+
+      // The representative file is resolved back to a project-relative path
+      // (module dir + module-relative file), not a module-relative one.
+      expect(result).toBe("backend/internal/middleware/auth.go");
+    });
+
+    it("resolves the module's own root package when go.mod is nested", () => {
+      project = createTempProject({
+        "backend/go.mod": "module github.com/example/myapp-backend\n\ngo 1.22\n",
+        "backend/main.go": "",
+        "backend/internal/helper.go": "",
+      });
+      const goModules = buildGoModuleInfo(project.fileSet, project.root);
+
+      const result = resolveImport(
+        "github.com/example/myapp-backend",
+        path.join(project.root, "backend/internal/helper.go"),
+        project.root,
+        project.fileSet,
+        "go",
+        undefined,
+        undefined,
+        undefined,
+        goModules,
+      );
+
+      expect(result).toBe("backend/main.go");
+    });
+
+    it("does not attribute a nested module's files to the root or other modules", () => {
+      // Two modules: one at the root, one nested under `backend/`. Files
+      // under `backend/` must resolve only via the nested module's path,
+      // and never collide with the root module's package map.
+      project = createTempProject({
+        "go.mod": "module github.com/example/root\n\ngo 1.22\n",
+        "rootpkg/foo.go": "",
+        "backend/go.mod": "module github.com/example/backend\n\ngo 1.22\n",
+        "backend/svc/bar.go": "",
+      });
+      const goModules = buildGoModuleInfo(project.fileSet, project.root);
+      expect(goModules.length).toBe(2);
+
+      const backend = goModules.find((m) => m.moduleDir === "backend");
+      expect(backend).toBeDefined();
+      expect(backend?.packageMap.has("svc")).toBe(true);
+      expect(backend?.packageMap.get("svc")).toBe("backend/svc/bar.go");
+      // The root module must not have picked up the nested file.
+      const root = goModules.find((m) => m.moduleDir === ".");
+      expect(root).toBeDefined();
+      expect(root?.packageMap.has("backend/svc")).toBe(false);
+
+      const result = resolveImport(
+        "github.com/example/backend/svc",
+        path.join(project.root, "backend/svc/bar.go"),
+        project.root,
+        project.fileSet,
+        "go",
+        undefined,
+        undefined,
+        undefined,
+        goModules,
+      );
+      expect(result).toBe("backend/svc/bar.go");
+    });
+
+    it("resolves the longest module-path prefix when modules share a prefix", () => {
+      // `github.com/example/app` (nested) vs `github.com/example/app-extra`
+      // style collisions are avoided by picking the longest matching path.
+      project = createTempProject({
+        "backend/go.mod": "module github.com/example/app\n\ngo 1.22\n",
+        "backend/sub/x.go": "",
+      });
+      const goModules = buildGoModuleInfo(project.fileSet, project.root);
+
+      const result = resolveImport(
+        "github.com/example/app/sub",
+        path.join(project.root, "backend/sub/x.go"),
+        project.root,
+        project.fileSet,
+        "go",
+        undefined,
+        undefined,
+        undefined,
+        goModules,
+      );
+      expect(result).toBe("backend/sub/x.go");
+    });
+
+    it("returns null for Go imports when no go.mod exists anywhere", () => {
+      project = createTempProject({
+        "backend/main.go": "",
+        "frontend/src/app.ts": "",
+      });
+      const goModules = buildGoModuleInfo(project.fileSet, project.root);
+      expect(goModules).toEqual([]);
+
+      const result = resolveImport(
+        "github.com/example/anything/internal",
+        path.join(project.root, "backend/main.go"),
+        project.root,
+        project.fileSet,
+        "go",
+        undefined,
+        undefined,
+        undefined,
+        goModules,
+      );
+      expect(result).toBeNull();
     });
   });
 
