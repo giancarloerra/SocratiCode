@@ -375,7 +375,16 @@ export function resolveImport(
 
       let chosen: GoModuleInfo | null = null;
       for (const mod of modules) {
-        if (!moduleSpecifier.startsWith(mod.modulePath)) continue;
+        // Match only structurally: the import equals the module path
+        // (its root package) or is a subpackage of it (path follows the
+        // module path with a "/"). A bare textual prefix is not enough —
+        // e.g. with modules `github.com/x` and `github.com/x/y`, the import
+        // `github.com/x/yother` must resolve via the shorter module, not be
+        // misrouted to `github.com/x/y` and then rejected.
+        const isStructuralPrefix =
+          moduleSpecifier === mod.modulePath ||
+          moduleSpecifier.startsWith(`${mod.modulePath}/`);
+        if (!isStructuralPrefix) continue;
         if (!chosen || mod.modulePath.length > chosen.modulePath.length) {
           chosen = mod;
         }

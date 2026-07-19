@@ -1230,6 +1230,34 @@ describe("graph-resolution", () => {
       expect(result).toBe("backend/sub/x.go");
     });
 
+    it("does not misroute a root-module subpackage that textually prefixes a nested module", () => {
+      // Modules `github.com/x` (root) and `github.com/x/y` (nested). The
+      // import `github.com/x/yother` is a subpackage `yother` of the root
+      // module, NOT part of `github.com/x/y`. Structural (not bare textual)
+      // prefix matching must route it to the root module.
+      project = createTempProject({
+        "go.mod": "module github.com/x\n\ngo 1.22\n",
+        "yother/z.go": "",
+        "x/y/go.mod": "module github.com/x/y\n\ngo 1.22\n",
+        "x/y/main.go": "",
+      });
+      const goModules = buildGoModuleInfo(project.fileSet, project.root);
+      expect(goModules.length).toBe(2);
+
+      const result = resolveImport(
+        "github.com/x/yother",
+        path.join(project.root, "x/y/main.go"),
+        project.root,
+        project.fileSet,
+        "go",
+        undefined,
+        undefined,
+        undefined,
+        goModules,
+      );
+      expect(result).toBe("yother/z.go");
+    });
+
     it("returns null for Go imports when no go.mod exists anywhere", () => {
       project = createTempProject({
         "backend/main.go": "",
