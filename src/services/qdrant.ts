@@ -892,6 +892,13 @@ export async function saveGraphData(
   const qdrant = getClient();
   const id = metadataPointId(graphCollName);
 
+  // Total import specifiers captured across all files, resolved or not. Stored
+  // alongside edgeCount so status can report the share that resolved without
+  // loading and walking the whole graph: a graph that resolved almost nothing
+  // is otherwise indistinguishable from a healthy one (issue #107). Graphs
+  // persisted before this field existed simply omit it.
+  const importCount = graph.nodes.reduce((sum, node) => sum + node.imports.length, 0);
+
   await qdrant.upsert(METADATA_COLLECTION, {
     points: [
       {
@@ -903,6 +910,7 @@ export async function saveGraphData(
           lastBuiltAt: new Date().toISOString(),
           nodeCount: graph.nodes.length,
           edgeCount: graph.edges.length,
+          importCount,
           graphData: JSON.stringify(graph),
         },
       },
@@ -947,6 +955,8 @@ export async function getGraphMetadata(graphCollName: string): Promise<{
   lastBuiltAt: string;
   nodeCount: number;
   edgeCount: number;
+  /** Absent on graphs persisted before this field was recorded. */
+  importCount?: number;
 } | null> {
   try {
     await ensureMetadataCollection();
@@ -966,6 +976,7 @@ export async function getGraphMetadata(graphCollName: string): Promise<{
       lastBuiltAt: payload?.lastBuiltAt as string,
       nodeCount: payload?.nodeCount as number,
       edgeCount: payload?.edgeCount as number,
+      importCount: payload?.importCount as number | undefined,
     };
   } catch (err) {
     logger.warn("getGraphMetadata failed (returning null)", {

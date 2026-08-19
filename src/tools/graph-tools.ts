@@ -3,7 +3,7 @@
 import path from "node:path";
 import { projectIdFromPath } from "../config.js";
 import { mergeExtraExtensions } from "../constants.js";
-import { awaitGraphBuild, ensureDynamicLanguages, findCircularDependencies, generateMermaidDiagram, getDynamicLanguageStatus, getFileDependencies, getGraphBuildProgress, getGraphStats, getGraphStatus, getLastGraphBuildCompleted, getOrBuildGraph, isGraphBuildInProgress, rebuildGraph, removeGraph } from "../services/code-graph.js";
+import { awaitGraphBuild, ensureDynamicLanguages, findCircularDependencies, generateMermaidDiagram, getDynamicLanguageStatus, getFileDependencies, getGraphBuildProgress, getGraphStats, getGraphStatus, getLastGraphBuildCompleted, getOrBuildGraph, isGraphBuildInProgress, isImportResolutionLow, rebuildGraph, removeGraph } from "../services/code-graph.js";
 import { detectEntryPoints } from "../services/graph-entrypoints.js";
 import {
   type FlowNode,
@@ -328,6 +328,31 @@ async function dispatchGraphTool(
         return lines.join("\n");
       }
 
+      // READY is emitted on graph existence alone, so a graph that resolved
+      // almost none of the imports it captured looks exactly like a healthy
+      // one, and consumers that gate on status send users to tools that answer
+      // empty — which reads as "nothing depends on this" rather than "the
+      // resolver failed" (issue #107). Stated directly beneath the edge count
+      // it qualifies, so the number is never read on its own. Deliberately not
+      // a DEGRADED status: a hard state would false-positive on legitimately
+      // orphan-heavy projects.
+      const renderImportResolutionBlock = (): string[] => {
+        // Captured before the predicate rather than asserted after it: the
+        // predicate already rejects an absent count, but TypeScript cannot
+        // narrow through the call, and an assertion here would keep compiling
+        // while printing "undefined" if the predicate ever started accepting
+        // one.
+        const captured = graphInfo.importCount;
+        if (captured === undefined) return [];
+        if (!isImportResolutionLow(graphInfo.edgeCount, captured)) return [];
+        const pct = ((graphInfo.edgeCount / captured) * 100).toFixed(1);
+        return [
+          `Import resolution: ${graphInfo.edgeCount} of ${captured} captured imports resolved to project files (${pct}%)`,
+          "  Most imports did not resolve, so codebase_graph_query, codebase_graph_stats and codebase_impact will under-report dependencies — an empty answer there means unresolved, not independent.",
+          "  Expected when a project's imports are mostly external (stdlib, third-party); otherwise the resolver may not support this project's layout.",
+        ];
+      };
+
       const ago = ((Date.now() - new Date(graphInfo.lastBuiltAt).getTime()) / 1000).toFixed(0);
       const lines = [
         `Code Graph Status for: ${resolved}`,
@@ -335,6 +360,7 @@ async function dispatchGraphTool(
         `Status: READY`,
         `Files (nodes): ${graphInfo.nodeCount}`,
         `Dependencies (edges): ${graphInfo.edgeCount}`,
+        ...renderImportResolutionBlock(),
         `Last built: ${graphInfo.lastBuiltAt} (${ago}s ago)`,
         `In-memory cache: ${graphInfo.cached ? "yes" : "no (will load from storage on next query)"}`,
       ];

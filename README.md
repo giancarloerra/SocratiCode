@@ -913,7 +913,7 @@ Once connected, 21 tools are available to your AI assistant:
 | `codebase_graph_stats` | Get graph statistics (most connected files, orphans, language breakdown) |
 | `codebase_graph_circular` | Detect circular dependencies |
 | `codebase_graph_visualize` | Generate a Mermaid diagram (`mode=mermaid`, default) or an interactive HTML explorer (`mode=interactive`) of the dependency graph. Interactive mode writes a self-contained page (vendored Cytoscape.js + Dagre, works offline) and opens it in your default browser — file + symbol views, blast-radius overlay, live search, PNG export. |
-| `codebase_graph_status` | Check graph build progress or persisted graph metadata |
+| `codebase_graph_status` | Check graph build progress or persisted graph metadata (advises when few captured imports resolved, so a near-empty graph is not read as a healthy one) |
 | `codebase_graph_remove` | Remove a project's persisted code graph (waits for in-flight graph build to finish first) |
 
 #### Impact Analysis (symbol-level call graph)

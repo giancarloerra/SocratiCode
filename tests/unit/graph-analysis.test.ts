@@ -6,6 +6,8 @@ import {
   generateMermaidDiagram,
   getFileDependencies,
   getGraphStats,
+  isImportResolutionLow,
+  LOW_IMPORT_RESOLUTION_MIN_IMPORTS,
 } from "../../src/services/graph-analysis.js";
 import type { CodeGraph, CodeGraphEdge, CodeGraphNode } from "../../src/types.js";
 
@@ -353,6 +355,57 @@ describe("graph-analysis", () => {
       const graph = makeGraph(nodes, []);
       const mermaid = generateMermaidDiagram(graph);
       expect(mermaid).toContain("subgraph Legend");
+    });
+  });
+
+  // ── Import-resolution yield (#107) ───────────────────────────────────
+
+  describe("isImportResolutionLow", () => {
+    // codebase_graph_status reports READY on graph existence alone, so a
+    // resolver failure and a healthy graph are indistinguishable downstream.
+    // These pin the measurement that tells them apart.
+
+    it("flags a graph that resolved almost none of its captured imports", () => {
+      // Measured on the issue #107 repo before the fix: 35 of 2,959 (1.2%).
+      expect(isImportResolutionLow(35, 2959)).toBe(true);
+    });
+
+    it("stays quiet on the same repo once the resolver handles its layout", () => {
+      // The same repo after the fix: 2,103 of 2,959 (71%).
+      expect(isImportResolutionLow(2103, 2959)).toBe(false);
+    });
+
+    it("stays quiet on a project whose imports are mostly external", () => {
+      // Measured on a doc-heavy repo: 23 of 304 (7.6%). Few in-tree imports
+      // and many external ones is a healthy shape, not a resolver failure.
+      expect(isImportResolutionLow(23, 304)).toBe(false);
+    });
+
+    it("stays quiet just above the ratio and fires just below it", () => {
+      // Boundary either side of 2%, at an import count well over the floor.
+      expect(isImportResolutionLow(21, 1000)).toBe(false);
+      expect(isImportResolutionLow(19, 1000)).toBe(true);
+    });
+
+    it("treats a ratio exactly at the threshold as acceptable", () => {
+      expect(isImportResolutionLow(20, 1000)).toBe(false);
+    });
+
+    it("says nothing about a project with too few imports to judge", () => {
+      // A five-file utility repo importing only `os` and `json` resolves zero
+      // and is correct; the ratio carries no signal at this size.
+      expect(isImportResolutionLow(0, LOW_IMPORT_RESOLUTION_MIN_IMPORTS - 1)).toBe(false);
+      expect(isImportResolutionLow(0, 0)).toBe(false);
+    });
+
+    it("judges a project once it reaches the import floor", () => {
+      expect(isImportResolutionLow(0, LOW_IMPORT_RESOLUTION_MIN_IMPORTS)).toBe(true);
+    });
+
+    it("says nothing when the count is absent on an older persisted graph", () => {
+      // importCount post-dates existing graphs; those print nothing until the
+      // next rebuild rather than being guessed at.
+      expect(isImportResolutionLow(0, undefined)).toBe(false);
     });
   });
 });

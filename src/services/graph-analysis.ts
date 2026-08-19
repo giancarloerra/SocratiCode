@@ -16,6 +16,58 @@ export function nodeLanguage(node: Pick<CodeGraphNode, "language" | "relativePat
 }
 
 /**
+ * Fraction of captured imports that must resolve to project files before the
+ * file graph is reported without a caveat.
+ *
+ * Measured across real repos, a resolver that cannot see a project's layout
+ * lands an order of magnitude below one that can. The same 618-file Python
+ * workspace resolved 35 of its 2,959 captured imports (1.2%) before the
+ * issue #107 fix and 2,103 of them (71%) after; a second Python repo sits at
+ * 42%, and a doc-heavy repo whose imports are largely external still reaches
+ * 7.6%. 2% sits in the gap between the broken regime and the lowest healthy
+ * reading, so the advisory fires on a resolver failure without nagging a
+ * project that merely imports a lot of external code.
+ *
+ * It is a caveat on how to read the graph, not a verdict on the project: a
+ * repo of scripts that import nothing but stdlib genuinely resolves near zero
+ * and will trip this. That is why the advisory states what was measured and
+ * names the benign explanation, and why there is no DEGRADED status token.
+ */
+export const LOW_IMPORT_RESOLUTION_RATIO = 0.02;
+
+/**
+ * Captured-import floor below which the ratio is not reported on at all.
+ *
+ * A handful of imports carries no signal — a five-file utility repo that
+ * imports nothing but `os` and `json` would otherwise be told its graph is
+ * degraded when it is complete and correct.
+ */
+export const LOW_IMPORT_RESOLUTION_MIN_IMPORTS = 20;
+
+/**
+ * Whether a built graph resolved so few of the imports it captured that its
+ * dependency answers should be read as under-reporting rather than as
+ * findings.
+ *
+ * `codebase_graph_status` reports READY on graph existence alone, so a graph
+ * that resolved almost nothing is indistinguishable from a healthy one, and
+ * every downstream tool answers "no dependency information" — which reads as
+ * "nothing depends on this" rather than "the resolver failed" (issue #107).
+ * Comparing resolved edges against the imports actually captured is what
+ * separates the two: it is a per-project ratio that does not move with repo
+ * size, unlike an absolute edge count, and it is not the symbol graph's
+ * `unresolvedEdgePct`, which measures call-site resolution and reads high on
+ * healthy repos.
+ *
+ * `importCount` is absent on graphs persisted before it was recorded; those
+ * return false and print nothing until the next rebuild, rather than guessing.
+ */
+export function isImportResolutionLow(edgeCount: number, importCount?: number): boolean {
+  if (importCount === undefined || importCount < LOW_IMPORT_RESOLUTION_MIN_IMPORTS) return false;
+  return edgeCount / importCount < LOW_IMPORT_RESOLUTION_RATIO;
+}
+
+/**
  * Get dependencies for a specific file.
  * The input path is normalized to forward slashes so lookups succeed
  * regardless of whether the caller passes `/` or `\` separators.

@@ -39,7 +39,7 @@ import {
 } from "./symbol-graph-store.js";
 
 // Re-export analysis functions for external consumers
-export { findCircularDependencies, generateMermaidDiagram, getFileDependencies, getGraphStats } from "./graph-analysis.js";
+export { findCircularDependencies, generateMermaidDiagram, getFileDependencies, getGraphStats, isImportResolutionLow } from "./graph-analysis.js";
 
 // createRequire needed to load native addon packages in ESM
 const esmRequire = createRequire(import.meta.url);
@@ -446,6 +446,9 @@ export async function getGraphStatus(projectPath: string): Promise<{
   lastBuiltAt: string;
   nodeCount: number;
   edgeCount: number;
+  /** Import specifiers captured across all files, resolved or not. Absent on
+   * graphs persisted before this field was recorded. */
+  importCount?: number;
   cached: boolean;
   symbol?: {
     fileCount: number;
@@ -488,6 +491,7 @@ export async function getGraphStatus(projectPath: string): Promise<{
     lastBuiltAt: meta.lastBuiltAt,
     nodeCount: meta.nodeCount,
     edgeCount: meta.edgeCount,
+    importCount: meta.importCount,
     cached: graphCache.has(resolved),
     symbol,
   };

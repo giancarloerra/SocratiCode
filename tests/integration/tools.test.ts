@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { invalidateGraphCache, rebuildGraph } from "../../src/services/code-graph.js";
@@ -131,6 +132,75 @@ describe("graph tool handlers", () => {
       // Should contain dependency info
       expect(result).toBeDefined();
       expect(result.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("codebase_graph_status import-resolution advisory (#107)", () => {
+    // The status output is where a consumer learns whether the graph can be
+    // trusted. READY is emitted on graph existence alone, so these pin that a
+    // graph which resolved almost nothing says so, and that a healthy one
+    // stays silent. The predicate's own boundaries are unit-tested; this is
+    // about the persisted count reaching the rendered output at all.
+
+    const buildPyProject = (name: string, body: (i: number) => string): FixtureProject => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), `socraticode-${name}-`));
+      fs.mkdirSync(path.join(root, "pkg"), { recursive: true });
+      fs.writeFileSync(path.join(root, "pkg", "__init__.py"), "", "utf-8");
+      for (let i = 0; i < 30; i++) {
+        fs.writeFileSync(path.join(root, "pkg", `mod_${i}.py`), body(i), "utf-8");
+      }
+      return {
+        root,
+        cleanup: () => {
+          try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ }
+        },
+      };
+    };
+
+    it("reports the yield when almost no captured import resolved", async () => {
+      // 30 first-party-looking imports, none of which name a file in the
+      // tree — the shape a resolver failure produces.
+      const proj = buildPyProject(
+        "low-yield",
+        (i) => `from absent_dist_${i}.helpers import thing\n\ndef fn_${i}():\n    return thing\n`,
+      );
+      try {
+        await rebuildGraph(proj.root);
+
+        const result = await handleGraphTool("codebase_graph_status", {
+          projectPath: proj.root,
+        });
+
+        expect(result).toContain("Status: READY");
+        expect(result).toContain("Import resolution:");
+        expect(result).toContain("captured imports resolved to project files");
+        expect(result).toContain("will under-report dependencies");
+      } finally {
+        invalidateGraphCache(proj.root);
+        proj.cleanup();
+      }
+    });
+
+    it("stays silent on a graph whose imports resolved", async () => {
+      // Same size and import count, every import resolvable in-tree.
+      const proj = buildPyProject(
+        "healthy-yield",
+        (i) =>
+          `${i > 0 ? `from pkg.mod_${i - 1} import fn_${i - 1}\n` : ""}\ndef fn_${i}():\n    return ${i}\n`,
+      );
+      try {
+        await rebuildGraph(proj.root);
+
+        const result = await handleGraphTool("codebase_graph_status", {
+          projectPath: proj.root,
+        });
+
+        expect(result).toContain("Status: READY");
+        expect(result).not.toContain("Import resolution:");
+      } finally {
+        invalidateGraphCache(proj.root);
+        proj.cleanup();
+      }
     });
   });
 
