@@ -348,6 +348,29 @@ export function extractImports(source: string, lang: Lang | string, _ext: string
         }
         break;
       }
+      case "elixir": {
+        // alias/import/require/use MyApp.Module [,...]
+        for (const node of sgNode.findAll({ rule: { kind: "call" } })) {
+          const children = node.children();
+          const directive = children.find((child) => child.kind() === "identifier")?.text();
+          if (!directive || !["alias", "import", "require", "use"].includes(directive)) continue;
+          const args = children.find((child) => child.kind() === "arguments")?.text() ?? "";
+          const match = args.match(/^([A-Z]\w*(?:\.[A-Z]\w*)*)(?:\.\{([^}]+)\})?/);
+          if (!match) continue;
+          if (match[2]) {
+            for (const member of match[2].split(",")) {
+              const name = member.trim();
+              if (/^[A-Z]\w*$/.test(name)) {
+                imports.push({ moduleSpecifier: `${match[1]}.${name}`, isDynamic: false });
+              }
+            }
+          } else {
+            imports.push({ moduleSpecifier: match[1], isDynamic: false });
+          }
+        }
+        break;
+      }
+
       case "bash": {
         // source ./script.sh or . ./script.sh
         for (const node of sgNode.findAll({ rule: { kind: "command" } })) {

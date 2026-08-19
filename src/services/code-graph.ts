@@ -14,7 +14,7 @@ import type {
 import { detectExtensionFromSource, resolveExtensionlessExtension } from "./extensionless.js";
 import { loadPathAliases } from "./graph-aliases.js";
 import { extractImports } from "./graph-imports.js";
-import { buildCsNamespaceMap, buildDartPackageMap, buildGoModuleInfo, buildJvmSuffixMap, buildPhpPsr4Map, buildPythonManifests, pythonRootsForFile, resolveImport } from "./graph-resolution.js";
+import { buildCsNamespaceMap, buildDartPackageMap, buildElixirModuleMap, buildGoModuleInfo, buildJvmSuffixMap, buildPhpPsr4Map, buildPythonManifests, pythonRootsForFile, resolveImport } from "./graph-resolution.js";
 import { computeUnresolvedPct, resolveCallSites } from "./graph-symbol-resolution.js";
 import { extractSymbolsAndCalls, rawCallsToUnresolvedEdges } from "./graph-symbols.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
@@ -549,6 +549,7 @@ export function ensureDynamicLanguages(): void {
       ["php",     "@ast-grep/lang-php"],
       ["lua",     "@ast-grep/lang-lua"],
       ["dart",    "@ast-grep/lang-dart"],
+      ["elixir",  "@ast-grep/lang-elixir"],
     ];
 
     for (const [name, pkg] of langPackages) {
@@ -613,6 +614,7 @@ const EXTENSION_TO_AST_GREP_LANG: Record<string, Lang | string> = {
   ".php": "php",
   ".swift": "swift",
   ".dart": "dart",
+  ".ex": "elixir", ".exs": "elixir",
   ".lua": "lua",
   ".sh": "bash", ".bash": "bash", ".zsh": "bash",
   // Composite languages (parsed via HTML + script re-parse)
@@ -856,6 +858,11 @@ export async function buildCodeGraph(
     return roots;
   };
 
+  // Elixir module names do not imply paths. Resolve directives against
+  // in-project `defmodule` declarations.
+  const hasElixir = files.some((f) => [".ex", ".exs"].includes(path.extname(f).toLowerCase()));
+  const elixirModuleMap = hasElixir ? buildElixirModuleMap(fileSet, resolvedPath) : undefined;
+
   for (const relPath of files) {
     let ext = path.extname(relPath).toLowerCase();
     let lang = getAstGrepLang(ext);
@@ -976,7 +983,7 @@ export async function buildCodeGraph(
       // Try to resolve to a project file
       // CSS imports from <style> blocks use CSS resolution even when the source file is Svelte/Vue
       const resolutionLanguage = imp.isCssImport ? "css" : language;
-      const resolved = resolveImport(imp.moduleSpecifier, absolutePath, resolvedPath, fileSet, resolutionLanguage, aliases, jvmSuffixMap, csNamespaceMap, goModuleInfo, phpPsr4Map, dartPackageMap, pythonRootsFor(relPath));
+      const resolved = resolveImport(imp.moduleSpecifier, absolutePath, resolvedPath, fileSet, resolutionLanguage, aliases, jvmSuffixMap, csNamespaceMap, goModuleInfo, phpPsr4Map, dartPackageMap, pythonRootsFor(relPath), elixirModuleMap);
       if (resolved) {
         node.dependencies.push(resolved);
 

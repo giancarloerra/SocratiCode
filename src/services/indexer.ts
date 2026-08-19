@@ -283,6 +283,7 @@ const TOP_LEVEL_KINDS: Record<string, string[]> = {
   // starting on the same line. Both kinds are listed so the overlap-merge in
   // findAstBoundaries fuses each signature/body pair into one region.
   dart:       ["class_definition", "mixin_declaration", "enum_declaration", "extension_declaration", "type_alias", "function_signature", "function_body"],
+  elixir:     ["call"],
 };
 
 /** Minimum lines for a chunk to stand on its own (otherwise merge with neighbors) */
@@ -314,7 +315,7 @@ function findAstBoundaries(source: string, lang: Lang | string): AstRegion[] {
         // Only top-level nodes (depth 1 from root, or depth 2 for namespace/module wrappers)
         const parent = node.parent();
         const grandparent = parent?.parent();
-        const isTopLevel = !parent || parent.kind() === "program" || parent.kind() === "source_file"
+        const isTopLevel = !parent || parent.kind() === "program" || parent.kind() === "source" || parent.kind() === "source_file"
           || parent.kind() === "translation_unit" || parent.kind() === "module"
           || parent.kind() === "export_statement" || parent.kind() === "decorated_definition"
           || parent.kind() === "compilation_unit"

@@ -180,6 +180,7 @@ export const ENTRY_POINT_NAMES: Record<string, Set<string>> = {
   ruby: new Set(["main"]),
   php: new Set(["main"]),
   dart: new Set(["main"]),
+  elixir: new Set(["main"]),
 };
 
 // ── Path normalization ──────────────────────────────────────────────────
@@ -229,6 +230,8 @@ export const SUPPORTED_EXTENSIONS = new Set([
   ".sql",
   // Dart
   ".dart",
+  // Elixir
+  ".ex", ".exs",
   // Lua
   ".lua",
   // R
@@ -303,6 +306,7 @@ const EXTENSION_TO_LANGUAGE: Record<string, string> = {
   ".md": "markdown", ".mdx": "markdown", ".rst": "rst",
   ".sql": "sql",
   ".dart": "dart",
+  ".ex": "elixir", ".exs": "elixir",
   ".lua": "lua",
   ".r": "r", ".R": "r",
   ".dockerfile": "dockerfile",
@@ -334,6 +338,7 @@ const LANGUAGE_TO_CANONICAL_EXT: Record<string, string> = {
   php: ".php",
   swift: ".swift",
   dart: ".dart",
+  elixir: ".ex",
   lua: ".lua",
   shell: ".sh", bash: ".sh", sh: ".sh",
   html: ".html",

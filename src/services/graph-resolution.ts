@@ -276,6 +276,23 @@ export interface GoModuleInfo {
   packageMap: Map<string, string>;
 }
 
+/** Map each in-project Elixir `defmodule` name to its first file, deterministically. */
+export function buildElixirModuleMap(fileSet: Set<string>, projectPath: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const file of [...fileSet].filter((f) => [".ex", ".exs"].includes(path.extname(f))).sort()) {
+    let source: string;
+    try {
+      source = readFileSync(path.join(projectPath, file), "utf8");
+    } catch {
+      continue;
+    }
+    for (const match of source.matchAll(/^\s*defmodule\s+([A-Z]\w*(?:\.[A-Z]\w*)*)\s+do\b/gm)) {
+      if (!map.has(match[1])) map.set(match[1], file);
+    }
+  }
+  return map;
+}
+
 /**
  * Build Go module-resolution info for a project, one entry per `go.mod`.
  *
@@ -987,6 +1004,7 @@ export function resolveImport(
   phpPsr4Map?: Map<string, string[]>,
   dartPackageMap?: Map<string, string>,
   pythonImportRoots?: string[],
+  elixirModuleMap?: Map<string, string>,
 ): string | null {
   // Skip obvious external/stdlib modules. Go is excluded from this
   // pre-check because its external classifier in `isExternalModule`
@@ -1343,6 +1361,10 @@ export function resolveImport(
         return resolveRelativePath(libPath, projectPath, projectPath, fileSet, [".dart"]);
       }
       return resolveRelativePath(moduleSpecifier, sourceDir, projectPath, fileSet, [".dart"]);
+    }
+
+    case "elixir": {
+      return elixirModuleMap?.get(moduleSpecifier) ?? null;
     }
 
     case "lua": {

@@ -179,6 +179,9 @@ export function extractSymbolsAndCalls(
     if (langKey === "dart") {
       return extractFromDart(source, relativePath, language, moduleSymbol);
     }
+    if (langKey === "elixir") {
+      return extractFromElixir(source, relativePath, language, moduleSymbol);
+    }
     // Svelte, Vue and others fall through to the regex fallback.
     return extractFromRegex(source, relativePath, language, moduleSymbol);
   } catch (err) {
@@ -195,6 +198,100 @@ export function extractSymbolsAndCalls(
     }
     return { symbols: [moduleSymbol], rawCalls: [] };
   }
+}
+
+// ── Elixir ───────────────────────────────────────────────────────────────
+
+function extractFromElixir(
+  source: string,
+  file: string,
+  language: string,
+  moduleSym: SymbolNode,
+): ExtractedSymbols {
+  const root = parse("elixir" as unknown as Lang, source).root();
+  const symbols: SymbolNode[] = [moduleSym];
+  const scopes: ScopeFrame[] = [];
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const childrenOf = (node: any): any[] => {
+    try {
+      return node.children();
+    } catch {
+      return [];
+    }
+  };
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const callName = (node: any): string | null => {
+    const children = childrenOf(node);
+    const identifier = children.find((child) => child.kind() === "identifier");
+    if (identifier) return identifier.text();
+    const dot = children.find((child) => child.kind() === "dot");
+    const names = dot ? safeFindAll(dot, "identifier") : [];
+    return names.at(-1)?.text() ?? null;
+  };
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const isDefinitionHead = (node: any): boolean => {
+    const args = node.parent();
+    const definition = args?.kind() === "arguments" ? args.parent() : null;
+    const name = definition ? callName(definition) : null;
+    return name === "def" || name === "defp";
+  };
+  const addSymbol = (
+    name: string,
+    qualifiedName: string,
+    kind: SymbolKind,
+    startLine: number,
+    endLine: number,
+  ): void => {
+    const symbol: SymbolNode = {
+      id: makeId(file, qualifiedName, startLine),
+      name, qualifiedName, kind, file, line: startLine, endLine, language,
+    };
+    symbols.push(symbol);
+    scopes.push({ name: qualifiedName, startLine, endLine, symbolId: symbol.id });
+  };
+
+  const calls = safeFindAll(root, "call");
+  const modules: Array<{ name: string; startLine: number; endLine: number }> = [];
+  for (const node of calls) {
+    if (callName(node) !== "defmodule") continue;
+    const args = childrenOf(node).find((child) => child.kind() === "arguments");
+    const name = args ? safeFindAll(args, "alias")[0]?.text() : null;
+    if (!name) continue;
+    const range = node.range();
+    const startLine = range.start.line + 1;
+    const endLine = range.end.line + 1;
+    addSymbol(name, name, "module", startLine, endLine);
+    modules.push({ name, startLine, endLine });
+  }
+
+  for (const node of calls) {
+    const visibility = callName(node);
+    if (visibility !== "def" && visibility !== "defp") continue;
+    const name = node.text().match(/^(?:def|defp)\s+([a-z_]\w*[!?]?)/)?.[1];
+    if (!name) continue;
+    const range = node.range();
+    const startLine = range.start.line + 1;
+    const endLine = range.end.line + 1;
+    const owner = modules
+      .filter((module) => startLine >= module.startLine && endLine <= module.endLine)
+      .sort((a, b) => b.startLine - a.startLine)[0];
+    addSymbol(name, owner ? `${owner.name}.${name}` : name, "function", startLine, endLine);
+  }
+
+  const directives = new Set(["def", "defp", "defmodule", "alias", "import", "require", "use"]);
+  const rawCalls: ExtractedSymbols["rawCalls"] = [];
+  for (const node of calls) {
+    const calleeName = callName(node);
+    if (!calleeName || directives.has(calleeName) || isDefinitionHead(node)) continue;
+    const line = node.range().start.line + 1;
+    rawCalls.push({
+      callerId: findCallerId(scopes, line, moduleSym.id),
+      calleeName,
+      callSite: { file, line },
+    });
+  }
+
+  return { symbols, rawCalls };
 }
 
 // ── Lua (namespace tables: function T.f(), local function f(), T.f = function()) ──
