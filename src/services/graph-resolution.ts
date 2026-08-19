@@ -560,6 +560,120 @@ export function buildDartPackageMap(projectPath: string): Map<string, string> {
 }
 
 /**
+ * Discover every `pyproject.toml` under `projectPath`, project-relative and
+ * forward-slash-normalized.
+ *
+ * `pyproject.toml` is not a graphable file (no AST grammar, not an extra
+ * extension), so it is never in the set returned by `getGraphableFiles` —
+ * this walk is independent of that set, exactly like {@link findGoModFiles}
+ * (the fileSet-scan trap from issue #82 applies here identically). The same
+ * ignore filter (`createIgnoreFilter` / `shouldIgnore`) `getGraphableFiles`
+ * uses is applied, with the same trailing-slash convention for directories,
+ * so a manifest under `node_modules/`, `.git/`, or a gitignored path is
+ * skipped.
+ *
+ * `site-packages/` and `dist-packages/` are additionally skipped
+ * unconditionally. Every installed third-party distribution ships its own
+ * `pyproject.toml` in one of them, and each would register an import root
+ * over vendored code that shadows the project's own modules.
+ * DEFAULT_IGNORE_PATTERNS covers the common virtualenv directory names
+ * (`.venv`, `venv`, `env`), but an environment named anything else
+ * (`.venv312`, `myenv`) or a `.socraticodeignore` negation re-including one
+ * lands the walk straight in `lib/pythonX.Y/site-packages`. `dist-packages`
+ * is the same directory under Debian and Ubuntu's system Python.
+ */
+function findPyProjectManifests(projectPath: string): string[] {
+  const ig = createIgnoreFilter(projectPath);
+  const results: string[] = [];
+  const walk = (dir: string): void => {
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const relPath = toForwardSlash(path.relative(projectPath, path.join(dir, entry.name)));
+      if (shouldIgnore(ig, entry.isDirectory() ? `${relPath}/` : relPath)) continue;
+      if (entry.isDirectory()) {
+        if (entry.name === "site-packages" || entry.name === "dist-packages") continue;
+        walk(path.join(dir, entry.name));
+      } else if (entry.name === "pyproject.toml") {
+        // Mirrors findGoModFiles: readdirSync Dirents do not follow symlinks,
+        // so a symlinked manifest reports isFile()===false and would be missed.
+        // uv workspaces symlink member manifests in some layouts.
+        let isFile = entry.isFile();
+        if (!isFile && entry.isSymbolicLink()) {
+          try {
+            isFile = statSync(path.join(dir, entry.name)).isFile();
+          } catch {
+            continue;
+          }
+        }
+        if (isFile) results.push(relPath);
+      }
+    }
+  };
+  walk(projectPath);
+  return results.sort();
+}
+
+/**
+ * List every directory an absolute Python import may be rooted at, derived
+ * from the `pyproject.toml` manifests in the tree (project-relative,
+ * forward-slash, sorted; `"."` for a root-level manifest).
+ *
+ * A packaged Python project puts its importable modules under the manifest's
+ * directory in one of two layouts: `src/` (what `uv init --lib`, hatchling
+ * and setuptools all generate) or flat, directly beside the manifest. Neither
+ * is derivable from the import itself. `from usa_wa_adapter_sos.house import
+ * build` names no directory that appears in
+ * `packages/usa-wa-adapter-sos/src/usa_wa_adapter_sos/house/build.py`: the
+ * distribution directory is dashed, the module is underscored, and `src/`
+ * sits between them. The resolver's existing project-root `src/`+`lib/` probe
+ * only reaches a single-package repo, so in a workspace every cross-package
+ * import — and every package's own absolute self-import — resolved to null
+ * (issue #107). A 362-file uv workspace built 3 edges.
+ *
+ * Both roots are registered per manifest without probing the filesystem for
+ * which layout is in use: a root that does not exist holds no files, so it
+ * matches nothing, and the check would cost a `stat` per manifest to remove
+ * lookups that already miss.
+ *
+ * Roots are registered rather than module names enumerated under them. Names
+ * would have to come from the directories actually present — a distribution
+ * name and its import name are not reliably related (Pillow imports as `PIL`),
+ * so `[project] name` cannot supply them — and enumerating directories alone
+ * would miss single-module distributions, where `src/mymodule.py` is the whole
+ * importable surface and no directory bears the module's name. Trying each
+ * root in turn covers both, and covers PEP 420 namespace packages (no
+ * `__init__.py`) for free, since it never asks what a directory contains.
+ * Manifest contents are never read, so no TOML parser is needed.
+ *
+ * Sorted so that when two roots hold the same top-level module name the same
+ * one wins on every machine — resolveImport tries them in this order.
+ *
+ * A root-level manifest contributes `"."` and `"src"`, which duplicate the
+ * project-root and `src/`+`lib/` probes resolveImport already ran before it
+ * reaches these roots. The overlap is deliberate: this function describes
+ * every root the manifests declare, and filtering it against what some caller
+ * happens to try first would couple the two. The cost is two Set lookups on a
+ * path that has already failed.
+ *
+ * Call this once per graph build and pass the result to resolveImport.
+ */
+export function buildPythonImportRoots(projectPath: string): string[] {
+  const roots = new Set<string>();
+  const root = path.resolve(projectPath);
+  for (const relManifest of findPyProjectManifests(root)) {
+    const manifestDir = toForwardSlash(path.dirname(relManifest)); // "." at the root
+    roots.add(manifestDir);
+    roots.add(manifestDir === "." ? "src" : `${manifestDir}/src`);
+  }
+  return [...roots].sort();
+}
+
+/**
  * Resolve a module specifier to a relative file path within the project.
  * Returns null if the module is external (e.g., npm package, stdlib).
  *
@@ -582,6 +696,7 @@ export function resolveImport(
   goModuleInfo?: GoModuleInfo[] | null,
   phpPsr4Map?: Map<string, string[]>,
   dartPackageMap?: Map<string, string>,
+  pythonImportRoots?: string[],
 ): string | null {
   // Skip obvious external/stdlib modules. Go is excluded from this
   // pre-check because its external classifier in `isExternalModule`
@@ -647,13 +762,35 @@ export function resolveImport(
         if (inSrc) return inSrc;
       }
 
+      // Manifest-declared import roots (issue #107). The probe above only
+      // reaches `src/` and `lib/` at the project root, which is one layout of
+      // one packaged project; a workspace puts each package's modules under
+      // `<package>/src/` (or beside its own manifest), a path no
+      // module-name-shaped guess can reach.
+      //
+      // Placed here deliberately, between the two existing steps. After the
+      // project-root and `src/`+`lib/` probes, so anything they resolved is
+      // untouched. Before the sibling-flat fallback, because a root a build
+      // manifest declares is evidence where the sibling guess is a heuristic
+      // about how a script happens to be run — so where both match, the
+      // declared root wins. That IS a behavior change for a repo that has
+      // both a manifest and the #46 sibling shape: such an import can now
+      // resolve to a different file than it did before. It is intended, and
+      // pinned by "prefers a manifest root over the sibling-flat guess".
+      for (const importRoot of pythonImportRoots ?? []) {
+        const inRoot = resolveRelativePath(
+          path.posix.join(importRoot, modulePath), projectPath, projectPath, fileSet, [".py"],
+        );
+        if (inRoot) return inRoot;
+      }
+
       // Sibling-flat fallback (issue #46). Common in service-style monorepos
       // where each top-level directory is a runnable Python application root
       // and `import config` from `service-a/main.py` means
       // `service-a/config.py` because the file is run via `python main.py`
-      // from inside its own directory. Tried last to preserve existing
-      // project-root precedence: any layout that already resolved before
-      // this PR continues to resolve to the same file. resolveRelativePath
+      // from inside its own directory. Tried after the manifest-declared
+      // roots above and after the project-root probes, so it stays the
+      // last-resort guess it was introduced as. resolveRelativePath
       // also handles the `<sourceDir>/<module>/__init__.py` package case
       // via its built-in Python init fallback.
       const sibling = resolveRelativePath(modulePath, sourceDir, projectPath, fileSet, [".py"]);

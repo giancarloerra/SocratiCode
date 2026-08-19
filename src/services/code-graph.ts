@@ -14,7 +14,7 @@ import type {
 import { detectExtensionFromSource, resolveExtensionlessExtension } from "./extensionless.js";
 import { loadPathAliases } from "./graph-aliases.js";
 import { extractImports } from "./graph-imports.js";
-import { buildCsNamespaceMap, buildDartPackageMap, buildGoModuleInfo, buildJvmSuffixMap, buildPhpPsr4Map, resolveImport } from "./graph-resolution.js";
+import { buildCsNamespaceMap, buildDartPackageMap, buildGoModuleInfo, buildJvmSuffixMap, buildPhpPsr4Map, buildPythonImportRoots, resolveImport } from "./graph-resolution.js";
 import { computeUnresolvedPct, resolveCallSites } from "./graph-symbol-resolution.js";
 import { extractSymbolsAndCalls, rawCallsToUnresolvedEdges } from "./graph-symbols.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
@@ -825,6 +825,19 @@ export async function buildCodeGraph(
   const hasDart = files.some((f) => path.extname(f).toLowerCase() === ".dart");
   const dartPackageMap = hasDart ? buildDartPackageMap(resolvedPath) : undefined;
 
+  // List the directories absolute Python imports may be rooted at, from every
+  // pyproject.toml in the tree (discovered by walking, like go.mod and
+  // pubspec.yaml — pyproject.toml is never in the graphable file set). A
+  // workspace package's modules live under its own `src/`, which the
+  // resolver's project-root probe cannot reach, so without these roots every
+  // cross-package import — and every package's own absolute self-import —
+  // resolved to null and the file graph came out all but empty (issue #107).
+  // An empty/undefined list keeps the resolver's old behavior exactly.
+  const hasPython = files.some(
+    (f) => getLanguageFromExtension(path.extname(f).toLowerCase()) === "python",
+  );
+  const pythonImportRoots = hasPython ? buildPythonImportRoots(resolvedPath) : undefined;
+
   for (const relPath of files) {
     let ext = path.extname(relPath).toLowerCase();
     let lang = getAstGrepLang(ext);
@@ -945,7 +958,7 @@ export async function buildCodeGraph(
       // Try to resolve to a project file
       // CSS imports from <style> blocks use CSS resolution even when the source file is Svelte/Vue
       const resolutionLanguage = imp.isCssImport ? "css" : language;
-      const resolved = resolveImport(imp.moduleSpecifier, absolutePath, resolvedPath, fileSet, resolutionLanguage, aliases, jvmSuffixMap, csNamespaceMap, goModuleInfo, phpPsr4Map, dartPackageMap);
+      const resolved = resolveImport(imp.moduleSpecifier, absolutePath, resolvedPath, fileSet, resolutionLanguage, aliases, jvmSuffixMap, csNamespaceMap, goModuleInfo, phpPsr4Map, dartPackageMap, pythonImportRoots);
       if (resolved) {
         node.dependencies.push(resolved);
 
