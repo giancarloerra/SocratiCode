@@ -713,6 +713,89 @@ describe("graph-resolution", () => {
       expect(root?.members).toEqual(["packages/alpha"]);
     });
 
+    // An entry this reader cannot represent means something different in the
+    // two arrays, which is why they share one void. Losing a MEMBER costs an
+    // edge that should have resolved. Losing an EXCLUSION admits a package the
+    // manifest explicitly excludes and draws a cross-package edge uv would
+    // not — the reader inventing a declaration rather than missing one. These
+    // pin the exclude side, whose only case used to be the plain literal.
+
+    it("voids the section when an exclude entry is truncated by a comment", () => {
+      // The regression: comment-stripping cut the array at the `#`, so the
+      // real exclusion behind it vanished and `legacy` became a member.
+      // Reading strings as opaque keeps both entries, and the exclusion holds.
+      project = createTempProject({
+        "pyproject.toml":
+          '[tool.uv.workspace]\nmembers = ["packages/*"]\nexclude = ["packages/#legacy", "packages/legacy"]\n',
+        "packages/alpha/pyproject.toml": "",
+        "packages/legacy/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual(["packages/alpha"]);
+    });
+
+    it("keeps a package a member when the only exclusion names a `#` path", () => {
+      // Looks like the case above and is not: uv reads `packages/#legacy` as a
+      // literal path that matches nothing, so `legacy` stays a member and the
+      // cross-package edge is correct. Voiding here would drop a real edge.
+      project = createTempProject({
+        "pyproject.toml":
+          '[tool.uv.workspace]\nmembers = ["packages/*"]\nexclude = ["packages/#legacy"]\n',
+        "packages/alpha/pyproject.toml": "",
+        "packages/legacy/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual(["packages/alpha", "packages/legacy"]);
+    });
+
+    it("voids the section when an exclude entry uses a glob character class", () => {
+      // uv honours `[a]` as a class and excludes legacy. Matching it literally
+      // would exclude nothing and admit legacy, so the section is voided.
+      project = createTempProject({
+        "pyproject.toml":
+          '[tool.uv.workspace]\nmembers = ["packages/*"]\nexclude = ["packages/leg[a]cy"]\n',
+        "packages/alpha/pyproject.toml": "",
+        "packages/legacy/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual([]);
+    });
+
+    it("voids the section when an exclude entry is not a quoted scalar", () => {
+      // Reaching this through the scanner rather than the glob check: a
+      // malformed exclude must void just as a malformed members list does,
+      // since silently ignoring it would admit the excluded package.
+      project = createTempProject({
+        "pyproject.toml":
+          '[tool.uv.workspace]\nmembers = ["packages/*"]\nexclude = [packages/legacy]\n',
+        "packages/alpha/pyproject.toml": "",
+        "packages/legacy/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual([]);
+    });
+
+    it("voids the section when an exclude entry uses a `?` wildcard", () => {
+      project = createTempProject({
+        "pyproject.toml":
+          '[tool.uv.workspace]\nmembers = ["packages/*"]\nexclude = ["packages/legac?"]\n',
+        "packages/alpha/pyproject.toml": "",
+        "packages/legacy/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual([]);
+    });
+
     it("reads members from a header carrying a trailing comment", () => {
       // TOML's grammar allows a comment after a table header. Anchoring the
       // header to end-of-line rejected the commented form, and because a
@@ -743,12 +826,11 @@ describe("graph-resolution", () => {
       expect(root?.members).toEqual(["packages/alpha"]);
     });
 
-    it("keeps well-formed members when another entry contains a bracket", () => {
-      // Ending the array span at the first `]` in the text cut it inside the
-      // string, leaving no closing quote — so every member was lost, not just
-      // the bracketed one. The character class itself selects nothing (only
-      // `*` and `**` are interpreted), but it must not take its neighbours
-      // down with it.
+    it("voids the section when a member uses a glob character class", () => {
+      // uv matches with a full globset, so `packages/[ab]*` selects a set this
+      // reader cannot compute. Reading the rest of the array and ignoring this
+      // entry would be a guess about what the manifest declares; voiding falls
+      // back to ancestor-path scoping, which resolves strictly fewer imports.
       project = createTempProject({
         "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/[ab]*", "packages/*"]\n',
         "packages/alpha/pyproject.toml": "",
@@ -756,21 +838,96 @@ describe("graph-resolution", () => {
 
       const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
 
-      expect(root?.members).toEqual(["packages/alpha"]);
+      expect(root?.members).toEqual([]);
     });
 
-    it("keeps well-formed members past an unbalanced bracket in a string", () => {
-      // The bracket above is balanced, so counting brackets would survive it
-      // too; only treating a string as opaque survives this one. Without that,
-      // the span ends mid-string and every member is lost.
+    it("voids the section when a member uses a `?` wildcard", () => {
       project = createTempProject({
-        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/a]b", "packages/*"]\n',
+        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/alph?"]\n',
         "packages/alpha/pyproject.toml": "",
       });
 
       const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
 
+      expect(root?.members).toEqual([]);
+    });
+
+    it("reads a `#` inside a member string as a literal path character", () => {
+      // Not a defect and must not be treated as one: uv reads this as a path
+      // that happens to contain `#`, matches nothing, and the manifest
+      // declares no members. Comment handling must not truncate the string.
+      project = createTempProject({
+        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/#alpha"]\n',
+        "packages/alpha/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual([]);
+    });
+
+    it("reads a member string carrying the other quote character", () => {
+      // The old extraction stopped at whichever quote came first, so
+      // `"it's/*"` yielded the member `it` — a directory the manifest never
+      // names. Strings are opaque now, so the apostrophe is just a character.
+      project = createTempProject({
+        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["it\'s/*"]\n',
+        "it/pyproject.toml": "",
+        "it's/inner/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual(["it's/inner"]);
+    });
+
+    it("ignores a prose header even when a real table closes the section first", () => {
+      // Discriminates the masking from the scan: the section slice here ends
+      // at `[tool.other]`, before the closing delimiter, so nothing downstream
+      // ever sees a `"""`. Only refusing to find the header in masked text
+      // keeps this manifest from declaring members it does not have.
+      project = createTempProject({
+        "pyproject.toml":
+          'description = """\n[tool.uv.workspace]\nmembers = ["packages/*"]\n[tool.other]\n"""\n',
+        "packages/alpha/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual([]);
+    });
+
+    it("reads a members list beside a multi-line string in the same table", () => {
+      // The blanking must not cost a legitimate declaration: a `notes` block
+      // in the workspace table is blanked, and `members` beside it still
+      // reads.
+      // The prose carries its own `members` line ahead of the real one, so
+      // reading the section raw finds the wrong array first.
+      project = createTempProject({
+        "pyproject.toml":
+          '[tool.uv.workspace]\nnotes = """\nmembers = ["packages/legacy"]\n"""\nmembers = ["packages/alpha"]\n',
+        "packages/alpha/pyproject.toml": "",
+        "packages/legacy/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
       expect(root?.members).toEqual(["packages/alpha"]);
+    });
+
+    it("ignores a workspace header written inside a multi-line string", () => {
+      // `tomllib` reports no such table for prose in a description block. A
+      // line-anchored regex over raw text cannot tell them apart and would
+      // invent members for a manifest that declares none.
+      project = createTempProject({
+        "pyproject.toml":
+          'description = """\n[tool.uv.workspace]\nmembers = ["packages/*"]\n"""\n',
+        "packages/alpha/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual([]);
     });
 
     it("reads members only from the tool.uv.workspace table", () => {

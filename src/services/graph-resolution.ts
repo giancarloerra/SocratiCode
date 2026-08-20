@@ -697,6 +697,109 @@ export function buildPythonManifests(projectPath: string): PythonManifest[] {
   });
 }
 
+// Keys and header read out of `[tool.uv.workspace]`. Hoisted so each pattern is
+// a literal a reader can check once, rather than a string built per call. None
+// carries /g, so none holds lastIndex state between matches.
+const WORKSPACE_HEADER = /^[ \t]*\[tool\.uv\.workspace\][ \t]*(?:#.*)?$/m;
+const WORKSPACE_MEMBERS_KEY = /^[ \t]*members[ \t]*=[ \t]*\[/m;
+const WORKSPACE_EXCLUDE_KEY = /^[ \t]*exclude[ \t]*=[ \t]*\[/m;
+
+/**
+ * Blank the interior of every TOML multi-line string (`"""…"""`, `'''…'''`),
+ * preserving length and newlines so offsets and line anchors still line up
+ * with the original text.
+ *
+ * A table header only counts when it is a real header. `[tool.uv.workspace]`
+ * written on its own line inside a `description = """…"""` block is prose, and
+ * `tomllib` reports no such table for it, but a line-anchored regex over the
+ * raw text cannot tell the two apart and would read the prose as a
+ * declaration — inventing members and widening roots for a manifest that
+ * declares none.
+ */
+function maskMultilineStrings(source: string): string {
+  let out = "";
+  let i = 0;
+  while (i < source.length) {
+    const three = source.slice(i, i + 3);
+    if (three === '"""' || three === "'''") {
+      const close = source.indexOf(three, i + 3);
+      const end = close === -1 ? source.length : close + 3;
+      for (let j = i; j < end; j++) out += source[j] === "\n" ? "\n" : " ";
+      i = end;
+      continue;
+    }
+    out += source[i];
+    i++;
+  }
+  return out;
+}
+
+/** A `members`/`exclude` array read out of the section, or why it was not. */
+type ArrayScan =
+  | { kind: "entries"; entries: string[] }
+  /** The key is not present. Distinct from an empty array. */
+  | { kind: "absent" }
+  /** Present but not faithfully readable — the caller must void the section. */
+  | { kind: "unsupported" };
+
+/**
+ * Read one array of quoted scalars, treating strings as opaque.
+ *
+ * Comments are skipped between entries but never inside a string, so a `#` in
+ * a member path survives and a quoted word in a trailing comment is not
+ * mistaken for an entry. A bare or unterminated value is reported as
+ * `unsupported` rather than approximated.
+ *
+ * A newline inside a quoted value is not itself rejected: the value simply
+ * carries it, and no directory name can contain one, so such an entry matches
+ * nothing either way. What actually terminates the scan is running out of
+ * section without a closing quote.
+ */
+function scanStringArray(section: string, keyRe: RegExp): ArrayScan {
+  const m = section.match(keyRe);
+  if (m?.index === undefined) return { kind: "absent" };
+  let i = m.index + m[0].length; // just past the opening bracket
+  const entries: string[] = [];
+
+  for (;;) {
+    // Between entries: whitespace, separators and comments.
+    while (i < section.length) {
+      const ch = section[i];
+      if (ch === "#") {
+        while (i < section.length && section[i] !== "\n") i++;
+      } else if (ch === "," || ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
+        i++;
+      } else break;
+    }
+    if (i >= section.length) return { kind: "unsupported" }; // array never closed
+    if (section[i] === "]") return { kind: "entries", entries };
+
+    const quote = section[i];
+    if (quote !== '"' && quote !== "'") return { kind: "unsupported" }; // non-string entry
+    i++;
+    let value = "";
+    for (;;) {
+      if (i >= section.length) return { kind: "unsupported" };
+      const ch = section[i];
+      i++;
+      if (ch === quote) break;
+      value += ch;
+    }
+    entries.push(value);
+  }
+}
+
+/**
+ * Whether a member pattern uses glob syntax beyond the `*` and `**` this
+ * reader translates. uv matches with a full globset, so a character class,
+ * a `?`, a brace alternation or an escape selects a different set than a
+ * literal reading of the same text would. This is also what rejects a
+ * backslash escape, so the scanner does not need its own check for one.
+ */
+function usesUnsupportedGlob(pattern: string): boolean {
+  return /[?[\]{}\\]/.test(pattern);
+}
+
 /**
  * Project-relative directories of the `[tool.uv.workspace]` members a manifest
  * declares, selected from `allManifestDirs` — a member glob only matters here
@@ -704,9 +807,7 @@ export function buildPythonManifests(projectPath: string): PythonManifest[] {
  *
  * uv member entries are globs relative to the declaring manifest
  * (`members = ["packages/*"]`), with an optional `exclude` list of the same
- * shape. Only `*` (one path segment) and `**` (any number) are interpreted;
- * every other character, `?` included, is matched literally, which is stricter
- * than uv itself and can only ever drop a member rather than invent one.
+ * shape. Only `*` (one path segment) and `**` (any number) are translated.
  *
  * The section is located by its header and read only as far as the next
  * top-level table, so a `members` key belonging to some other tool cannot be
@@ -714,72 +815,63 @@ export function buildPythonManifests(projectPath: string): PythonManifest[] {
  * read for one array of strings, in the same spirit as buildDartPackageMap
  * reading a single anchored `name:`.
  *
- * Comments are handled in both places TOML allows them to break this: after
- * the table header, which the grammar permits and an end-of-line anchor would
- * reject, and inside the array, where a quoted word in a comment would
- * otherwise be read as a member.
+ * **The invariant is that this reader may narrow what a manifest declares,
+ * never widen it**, and the whole section is voided the moment it meets
+ * anything it cannot represent exactly: a multi-line string span, an entry
+ * that is not a single quoted scalar, an escape, or glob syntax beyond `*`
+ * and `**`. Voiding falls back to ancestor-path scoping, which resolves
+ * strictly fewer imports.
  *
- * What this reader does NOT understand, all of which drop members rather than
- * invent them — and all of which are silent, because a manifest with no
- * readable members simply scopes to its own subtree:
+ * The invariant has to hold for `exclude` as well as `members`, and that is
+ * why approximating is not enough. Dropping a member costs an edge that
+ * should have resolved. Dropping an *exclusion* admits a package the manifest
+ * explicitly excludes, and draws a cross-package edge uv would not — the
+ * reader inventing a declaration rather than missing one. An earlier revision
+ * stripped comments before reading the array, which truncated
+ * `exclude = ["packages/#legacy", "packages/legacy"]` at the `#` and lost the
+ * real exclusion behind it.
  *
- *   - a `#` inside a member string, which comment-stripping truncates;
- *   - an escaped quote inside a member string (`"pack\"ages/*"`), which ends
- *     the string early for the array scan;
- *   - multi-line basic strings, and any member spelled other than as a single
- *     quoted scalar;
- *   - glob syntax beyond `*` and `**` — a character class such as
- *     `packages/[ab]*` is matched literally and so selects nothing.
- *
- * Every one of these is legal TOML that no real workspace manifest is likely
- * to contain. The line is drawn here because the alternative is a TOML parser,
- * and this file is read for exactly one array of strings.
+ * A `#` inside a string is not itself a problem and is read as the literal
+ * path character it is: `exclude = ["packages/#legacy"]` names a directory
+ * that does not exist, matches nothing, and leaves `legacy` a member, which
+ * is what uv does with the same bytes.
  */
-// Array-valued keys read out of `[tool.uv.workspace]`. Hoisted so the pattern
-// is a literal a reader can check once, rather than a string built per call.
-// Neither carries /g, so neither holds lastIndex state between matches.
-const WORKSPACE_MEMBERS_KEY = /^[ \t]*members[ \t]*=[ \t]*\[/m;
-const WORKSPACE_EXCLUDE_KEY = /^[ \t]*exclude[ \t]*=[ \t]*\[/m;
-
 function declaredWorkspaceMembers(
   source: string,
   manifestDir: string,
   allManifestDirs: string[],
 ): string[] {
-  const header = source.match(/^[ \t]*\[tool\.uv\.workspace\][ \t]*(?:#.*)?$/m);
+  // Header discovery runs over masked text so prose cannot pose as a table;
+  // masking preserves length, so offsets still index the original.
+  const masked = maskMultilineStrings(source);
+  const header = masked.match(WORKSPACE_HEADER);
   if (header?.index === undefined) return [];
-  const rest = source.slice(header.index + header[0].length);
+  const from = header.index + header[0].length;
+  const rest = masked.slice(from);
   // Stop at the next top-level table header so a later section's keys are
   // never read as this one's.
   const nextSection = rest.match(/^[ \t]*\[/m);
-  const section = nextSection ? rest.slice(0, nextSection.index) : rest;
-  const body = section.replace(/#.*$/gm, "");
+  const to = nextSection?.index === undefined ? source.length : from + nextSection.index;
+  // Masked, not raw: a multi-line string inside this table is blanked, so its
+  // contents cannot pose as entries and a legitimate `members` beside it still
+  // reads. An entry spelled as a multi-line string blanks to nothing and the
+  // array comes back empty, which voids by the same path as any other
+  // unreadable declaration.
+  const section = masked.slice(from, to);
 
-  const listOf = (keyRe: RegExp): string[] => {
-    const m = body.match(keyRe);
-    if (m?.index === undefined) return [];
-    // Walk to the first `]` that sits outside a string, rather than to the
-    // first `]` in the text: a `]` inside a member string would otherwise end
-    // the span early, and the truncated span has no closing quote, so EVERY
-    // member is lost — including well-formed ones sharing the array.
-    const start = m.index + m[0].length;
-    let end = start;
-    let quote = "";
-    for (; end < body.length; end++) {
-      const ch = body[end];
-      if (quote) {
-        if (ch === quote) quote = "";
-      } else if (ch === '"' || ch === "'") {
-        quote = ch;
-      } else if (ch === "]") {
-        break;
-      }
-    }
-    return [...body.slice(start, end).matchAll(/['"]([^'"]*)['"]/g)].map((q) => q[1]);
-  };
+  const membersScan = scanStringArray(section, WORKSPACE_MEMBERS_KEY);
+  const excludeScan = scanStringArray(section, WORKSPACE_EXCLUDE_KEY);
+  if (membersScan.kind === "unsupported" || excludeScan.kind === "unsupported") return [];
+  if (membersScan.kind === "absent") return [];
 
-  // Split on the wildcards first and escape only the literal spans between
-  // them, so every other regex metacharacter — `?` included — matches itself.
+  const memberPatterns = membersScan.entries;
+  const excludePatterns = excludeScan.kind === "entries" ? excludeScan.entries : [];
+  if (memberPatterns.some(usesUnsupportedGlob) || excludePatterns.some(usesUnsupportedGlob)) {
+    return [];
+  }
+
+  // Split on the wildcards first and quote only the literal spans between
+  // them, so every other regex metacharacter matches itself.
   const toRe = (pattern: string): RegExp => {
     const quote = (literal: string) => literal.replace(/[.+^${}()|[\]\\?*]/g, "\\$&");
     const body = pattern
@@ -794,9 +886,9 @@ function declaredWorkspaceMembers(
     return dir.startsWith(prefix) ? dir.slice(prefix.length) : null;
   };
 
-  const included = listOf(WORKSPACE_MEMBERS_KEY).map((p) => toRe(p.replace(/\/+$/, "")));
+  const included = memberPatterns.map((p) => toRe(p.replace(/\/+$/, "")));
   if (included.length === 0) return [];
-  const excluded = listOf(WORKSPACE_EXCLUDE_KEY).map((p) => toRe(p.replace(/\/+$/, "")));
+  const excluded = excludePatterns.map((p) => toRe(p.replace(/\/+$/, "")));
 
   return allManifestDirs.filter((dir) => {
     if (dir === manifestDir) return false;
