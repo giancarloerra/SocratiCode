@@ -46,13 +46,13 @@ describe("Elixir support", () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-elixir-"));
     fs.mkdirSync(path.join(root, "lib"));
     fs.writeFileSync(path.join(root, "lib", "caller.ex"), "defmodule App.Caller do\n  alias App.Target\n  use App.Worker\nend\n");
-    fs.writeFileSync(path.join(root, "lib", "target.ex"), "defmodule App.Target do\nend\n");
-    fs.writeFileSync(path.join(root, "lib", "worker.exs"), "defmodule App.Worker do\nend\n");
+    fs.writeFileSync(path.join(root, "lib", "target.EX"), "defmodule App.Target, do: :ok\n");
+    fs.writeFileSync(path.join(root, "lib", "worker.EXS"), "defmodule(App.Worker, do: :ok)\n");
 
     const graph = await buildCodeGraph(root);
-    expect(graph.nodes.find((node) => node.relativePath === "lib/worker.exs")?.language).toBe("elixir");
+    expect(graph.nodes.find((node) => node.relativePath === "lib/worker.EXS")?.language).toBe("elixir");
     expect(graph.edges.filter((edge) => edge.source === "lib/caller.ex").map((edge) => edge.target).sort())
-      .toEqual(["lib/target.ex", "lib/worker.exs"]);
+      .toEqual(["lib/target.EX", "lib/worker.EXS"]);
   });
 
   it("extracts module and function symbols, calls, and AST chunk boundaries", () => {

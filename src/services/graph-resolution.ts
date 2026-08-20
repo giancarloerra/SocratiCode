@@ -279,14 +279,14 @@ export interface GoModuleInfo {
 /** Map each in-project Elixir `defmodule` name to its first file, deterministically. */
 export function buildElixirModuleMap(fileSet: Set<string>, projectPath: string): Map<string, string> {
   const map = new Map<string, string>();
-  for (const file of [...fileSet].filter((f) => [".ex", ".exs"].includes(path.extname(f))).sort()) {
+  for (const file of [...fileSet].filter((f) => [".ex", ".exs"].includes(path.extname(f).toLowerCase())).sort()) {
     let source: string;
     try {
       source = readFileSync(path.join(projectPath, file), "utf8");
     } catch {
       continue;
     }
-    for (const match of source.matchAll(/^\s*defmodule\s+([A-Z]\w*(?:\.[A-Z]\w*)*)\s+do\b/gm)) {
+    for (const match of source.matchAll(/^\s*defmodule\s*\(?\s*([A-Z]\w*(?:\.[A-Z]\w*)*)\s*(?=\)?\s*(?:do\b|,\s*do:))/gm)) {
       if (!map.has(match[1])) map.set(match[1], file);
     }
   }
