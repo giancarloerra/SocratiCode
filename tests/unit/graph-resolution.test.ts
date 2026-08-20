@@ -10,8 +10,10 @@ import {
   buildDartPackageMap,
   buildGoModuleInfo,
   buildJvmSuffixMap,
-  buildPythonImportRoots,
+  buildPythonManifests,
   hasLiteralShellPathShape,
+  type PythonManifest,
+  pythonRootsForFile,
   resolveImport,
 } from "../../src/services/graph-resolution.js";
 
@@ -379,15 +381,13 @@ describe("graph-resolution", () => {
     // — and every package's own absolute self-import — named a path the
     // project-root `src/`+`lib/` probe could not reach. A 362-file uv
     // workspace built 3 edges. These tests pin the mechanism the fix rests
-    // on: the roots the pyproject.toml manifests declare, tried in order.
+    // on: the roots the pyproject.toml manifests declare, scoped to the
+    // importing file and tried nearest first.
 
-    const pyResolve = (
-      spec: string,
-      from: string,
-      p: TempProject,
-      roots: string[] | undefined,
-    ) =>
-      resolveImport(
+    const pyResolve = (spec: string, from: string, p: TempProject) => {
+      const manifests = buildPythonManifests(p.root);
+      const roots = pythonRootsForFile(manifests, path.posix.dirname(from));
+      return resolveImport(
         spec,
         path.join(p.root, from),
         p.root,
@@ -401,27 +401,28 @@ describe("graph-resolution", () => {
         undefined,
         roots,
       );
+    };
 
     // The reporter's layout: dashed distribution directory, intervening src/,
     // underscored module name — a three-way mismatch no name-shaped guess
-    // can bridge.
+    // can bridge. The root manifest declares the members, which is what puts
+    // one package's roots in scope for another's files.
     const workspace = {
-      "packages/adapter-legislature/pyproject.toml": "[project]\nname = \"adapter-legislature\"\n",
+      "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/*"]\n',
+      "packages/adapter-legislature/pyproject.toml": '[project]\nname = "adapter-legislature"\n',
       "packages/adapter-legislature/src/adapter_legislature/tenure_spans.py": "",
-      "packages/adapter-sos/pyproject.toml": "[project]\nname = \"adapter-sos\"\n",
+      "packages/adapter-sos/pyproject.toml": '[project]\nname = "adapter-sos"\n',
       "packages/adapter-sos/src/adapter_sos/house/build.py": "",
       "packages/adapter-sos/src/adapter_sos/db.py": "",
     };
 
     it("resolves a cross-package import through a nested src/ root", () => {
       project = createTempProject(workspace);
-      const roots = buildPythonImportRoots(project.root);
 
       const result = pyResolve(
         "adapter_legislature.tenure_spans",
         "packages/adapter-sos/src/adapter_sos/house/build.py",
         project,
-        roots,
       );
 
       expect(result).toBe(
@@ -433,13 +434,11 @@ describe("graph-resolution", () => {
       // Confirmed broken on main too: a package could not even import itself
       // by its absolute module name, only relatively.
       project = createTempProject(workspace);
-      const roots = buildPythonImportRoots(project.root);
 
       const result = pyResolve(
         "adapter_sos.db",
         "packages/adapter-sos/src/adapter_sos/house/build.py",
         project,
-        roots,
       );
 
       expect(result).toBe("packages/adapter-sos/src/adapter_sos/db.py");
@@ -451,13 +450,13 @@ describe("graph-resolution", () => {
       // surface and no directory bears the module's name, so a name
       // enumeration would never see it.
       project = createTempProject({
-        "packages/solo/pyproject.toml": "[project]\nname = \"solo\"\n",
+        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/*"]\n',
+        "packages/solo/pyproject.toml": '[project]\nname = "solo"\n',
         "packages/solo/src/solo_mod.py": "",
         "app/main.py": "",
       });
-      const roots = buildPythonImportRoots(project.root);
 
-      expect(pyResolve("solo_mod", "app/main.py", project, roots)).toBe(
+      expect(pyResolve("solo_mod", "app/main.py", project)).toBe(
         "packages/solo/src/solo_mod.py",
       );
     });
@@ -466,13 +465,13 @@ describe("graph-resolution", () => {
       // Registering roots asks nothing about what a directory contains, so
       // implicit namespace packages resolve without a special case.
       project = createTempProject({
-        "packages/ns-pkg/pyproject.toml": "[project]\nname = \"ns-pkg\"\n",
+        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/*"]\n',
+        "packages/ns-pkg/pyproject.toml": '[project]\nname = "ns-pkg"\n',
         "packages/ns-pkg/src/acme/plugins/loader.py": "",
         "app/main.py": "",
       });
-      const roots = buildPythonImportRoots(project.root);
 
-      expect(pyResolve("acme.plugins.loader", "app/main.py", project, roots)).toBe(
+      expect(pyResolve("acme.plugins.loader", "app/main.py", project)).toBe(
         "packages/ns-pkg/src/acme/plugins/loader.py",
       );
     });
@@ -481,26 +480,26 @@ describe("graph-resolution", () => {
       // Not every packaged project uses src/; the manifest directory itself
       // is an import root in the flat layout.
       project = createTempProject({
-        "packages/flatpkg/pyproject.toml": "[project]\nname = \"flatpkg\"\n",
+        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/*"]\n',
+        "packages/flatpkg/pyproject.toml": '[project]\nname = "flatpkg"\n',
         "packages/flatpkg/flat_mod/thing.py": "",
         "app/main.py": "",
       });
-      const roots = buildPythonImportRoots(project.root);
 
-      expect(pyResolve("flat_mod.thing", "app/main.py", project, roots)).toBe(
+      expect(pyResolve("flat_mod.thing", "app/main.py", project)).toBe(
         "packages/flatpkg/flat_mod/thing.py",
       );
     });
 
     it("resolves a package import to __init__.py under a nested root", () => {
       project = createTempProject({
-        "packages/adapter-sos/pyproject.toml": "[project]\nname = \"adapter-sos\"\n",
+        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/*"]\n',
+        "packages/adapter-sos/pyproject.toml": '[project]\nname = "adapter-sos"\n',
         "packages/adapter-sos/src/adapter_sos/__init__.py": "",
         "app/main.py": "",
       });
-      const roots = buildPythonImportRoots(project.root);
 
-      expect(pyResolve("adapter_sos", "app/main.py", project, roots)).toBe(
+      expect(pyResolve("adapter_sos", "app/main.py", project)).toBe(
         "packages/adapter-sos/src/adapter_sos/__init__.py",
       );
     });
@@ -509,10 +508,9 @@ describe("graph-resolution", () => {
       // Third-party imports must stay unresolved rather than be guessed into
       // the project tree.
       project = createTempProject(workspace);
-      const roots = buildPythonImportRoots(project.root);
 
       expect(
-        pyResolve("requests.adapters", "packages/adapter-sos/src/adapter_sos/db.py", project, roots),
+        pyResolve("requests.adapters", "packages/adapter-sos/src/adapter_sos/db.py", project),
       ).toBeNull();
     });
 
@@ -522,93 +520,150 @@ describe("graph-resolution", () => {
       // half-resolving through some default.
       project = createTempProject(workspace);
 
-      expect(
-        pyResolve(
-          "adapter_legislature.tenure_spans",
-          "packages/adapter-sos/src/adapter_sos/house/build.py",
-          project,
-          undefined,
-        ),
-      ).toBeNull();
+      const result = resolveImport(
+        "adapter_legislature.tenure_spans",
+        path.join(project.root, "packages/adapter-sos/src/adapter_sos/house/build.py"),
+        project.root,
+        project.fileSet,
+        "python",
+      );
+
+      expect(result).toBeNull();
     });
 
     it("preserves project-root precedence over a manifest root", () => {
       // Backward-compat guarantee, mirroring the #46 pin above: a layout that
-      // already resolved to the project-root file still resolves to it. The
-      // new roots are tried only after the project-root and src/+lib/ probes
-      // fail.
+      // already resolved to the project-root file still resolves to it.
       project = createTempProject({
         "config.py": "",
-        "packages/pkg-a/pyproject.toml": "[project]\nname = \"pkg-a\"\n",
+        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/*"]\n',
+        "packages/pkg-a/pyproject.toml": '[project]\nname = "pkg-a"\n',
         "packages/pkg-a/src/config.py": "",
         "packages/pkg-a/src/pkg_a/main.py": "",
       });
-      const roots = buildPythonImportRoots(project.root);
 
-      expect(pyResolve("config", "packages/pkg-a/src/pkg_a/main.py", project, roots)).toBe(
-        "config.py",
-      );
+      expect(pyResolve("config", "packages/pkg-a/src/pkg_a/main.py", project)).toBe("config.py");
     });
 
-    it("prefers a manifest root over the sibling-flat guess", () => {
-      // Ordering decision: a root a build manifest declares is evidence,
-      // where the #46 sibling guess is a heuristic about how a script happens
-      // to be run. Both match here; the declared root wins.
+    it("prefers the sibling-flat guess over a manifest root", () => {
+      // CPython puts the script's own directory at sys.path[0], ahead of every
+      // installed-distribution entry, so where a sibling file and a package
+      // root both offer the module, the sibling is what actually gets
+      // imported. Both match here; the sibling wins.
       project = createTempProject({
-        "packages/pkg-a/pyproject.toml": "[project]\nname = \"pkg-a\"\n",
+        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/*"]\n',
+        "packages/pkg-a/pyproject.toml": '[project]\nname = "pkg-a"\n',
         "packages/pkg-a/src/shared/utils.py": "",
         "packages/pkg-a/src/pkg_a/main.py": "",
         "packages/pkg-a/src/pkg_a/shared/utils.py": "",
       });
-      const roots = buildPythonImportRoots(project.root);
 
-      expect(pyResolve("shared.utils", "packages/pkg-a/src/pkg_a/main.py", project, roots)).toBe(
-        "packages/pkg-a/src/shared/utils.py",
+      expect(pyResolve("shared.utils", "packages/pkg-a/src/pkg_a/main.py", project)).toBe(
+        "packages/pkg-a/src/pkg_a/shared/utils.py",
       );
     });
 
-    it("still falls back to sibling-flat when no declared root matches", () => {
-      // The roots must only add resolutions, never steal the #46 fallback
-      // from a layout that has no manifest root for the module.
+    it("keeps each service's flat modules local in a per-service monorepo", () => {
+      // Two flat `uv init --app` services, each with its own config.py. A flat
+      // list of every root in the tree resolved beta's `import config` to
+      // alpha's file, because alpha sorted first — a confident edge into
+      // another service, with an unchanged edge count so no yield signal could
+      // surface it.
       project = createTempProject({
-        "packages/pkg-a/pyproject.toml": "[project]\nname = \"pkg-a\"\n",
-        "packages/pkg-a/src/pkg_a/main.py": "",
-        "service-a/main.py": "",
-        "service-a/config.py": "",
+        "services/alpha-svc/pyproject.toml": '[project]\nname = "alpha-svc"\n',
+        "services/alpha-svc/main.py": "",
+        "services/alpha-svc/config.py": "",
+        "services/beta-svc/pyproject.toml": '[project]\nname = "beta-svc"\n',
+        "services/beta-svc/main.py": "",
+        "services/beta-svc/config.py": "",
       });
-      const roots = buildPythonImportRoots(project.root);
 
-      expect(pyResolve("config", "service-a/main.py", project, roots)).toBe("service-a/config.py");
+      expect(pyResolve("config", "services/beta-svc/main.py", project)).toBe(
+        "services/beta-svc/config.py",
+      );
+      expect(pyResolve("config", "services/alpha-svc/main.py", project)).toBe(
+        "services/alpha-svc/config.py",
+      );
+    });
+
+    it("prefers the importing package's own root over a sibling's for a non-sibling import", () => {
+      // Proximity ordering, in the case the #46 fallback cannot reach: the
+      // module sits under both packages' src/ roots but next to neither file,
+      // so only ordering by containment picks the importer's own package.
+      //
+      // The importer is the alphabetically LATER package on purpose. With
+      // pkg-a importing, lexicographic order would land on the right file by
+      // accident and the test could not tell proximity from luck — which is
+      // how a flat sorted list passed review while resolving beta-svc's
+      // `import config` to alpha-svc's file.
+      project = createTempProject({
+        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/*"]\n',
+        "packages/pkg-a/pyproject.toml": '[project]\nname = "pkg-a"\n',
+        "packages/pkg-a/src/shared/utils.py": "",
+        "packages/pkg-b/pyproject.toml": '[project]\nname = "pkg-b"\n',
+        "packages/pkg-b/src/shared/utils.py": "",
+        "packages/pkg-b/src/pkg_b/main.py": "",
+      });
+
+      expect(pyResolve("shared.utils", "packages/pkg-b/src/pkg_b/main.py", project)).toBe(
+        "packages/pkg-b/src/shared/utils.py",
+      );
+    });
+
+    it("does not resolve through a manifest in a non-importable subtree", () => {
+      // A sample app, cookiecutter template, docs project, checked-in sdist or
+      // per-fixture manifest sits on no sys.path the importing file could
+      // reach. Registering its roots globally turns an import that correctly
+      // resolved to nothing into a fabricated edge.
+      project = createTempProject({
+        "pyproject.toml": '[project]\nname = "mainpkg"\n',
+        "src/mainpkg/app.py": "",
+        "examples/demo/pyproject.toml": '[project]\nname = "demo"\n',
+        "examples/demo/settings.py": "",
+      });
+
+      expect(pyResolve("settings", "src/mainpkg/app.py", project)).toBeNull();
+    });
+
+    it("still resolves within a non-importable subtree's own files", () => {
+      // The example project is out of scope for the main package, not broken
+      // in itself: its own manifest is on its own files' ancestor path.
+      project = createTempProject({
+        "pyproject.toml": '[project]\nname = "mainpkg"\n',
+        "examples/demo/pyproject.toml": '[project]\nname = "demo"\n',
+        "examples/demo/src/demo_pkg/app.py": "",
+        "examples/demo/src/demo_pkg/settings.py": "",
+      });
+
+      expect(pyResolve("demo_pkg.settings", "examples/demo/src/demo_pkg/app.py", project)).toBe(
+        "examples/demo/src/demo_pkg/settings.py",
+      );
     });
 
     it("still resolves relative imports when roots are present", () => {
       project = createTempProject({
-        "packages/pkg-a/pyproject.toml": "[project]\nname = \"pkg-a\"\n",
-        "packages/pkg-a/src/pkg_a/main.py": "",
-        "packages/pkg-a/src/pkg_a/models.py": "",
+        "pyproject.toml": '[project]\nname = "pkg-a"\n',
+        "src/pkg_a/main.py": "",
+        "src/pkg_a/models.py": "",
       });
-      const roots = buildPythonImportRoots(project.root);
 
-      expect(pyResolve(".models", "packages/pkg-a/src/pkg_a/main.py", project, roots)).toBe(
-        "packages/pkg-a/src/pkg_a/models.py",
-      );
+      expect(pyResolve(".models", "src/pkg_a/main.py", project)).toBe("src/pkg_a/models.py");
     });
 
     it("keeps stdlib imports external even with roots present", () => {
       // A project directory named after a stdlib module must not start
       // drawing edges for `import os`.
       project = createTempProject({
-        "packages/pkg-a/pyproject.toml": "[project]\nname = \"pkg-a\"\n",
-        "packages/pkg-a/src/os.py": "",
-        "packages/pkg-a/src/pkg_a/main.py": "",
+        "pyproject.toml": '[project]\nname = "pkg-a"\n',
+        "src/os.py": "",
+        "src/pkg_a/main.py": "",
       });
-      const roots = buildPythonImportRoots(project.root);
 
-      expect(pyResolve("os", "packages/pkg-a/src/pkg_a/main.py", project, roots)).toBeNull();
+      expect(pyResolve("os", "src/pkg_a/main.py", project)).toBeNull();
     });
   });
 
-  describe("buildPythonImportRoots", () => {
+  describe("buildPythonManifests", () => {
     it("registers both the manifest directory and its src/ subdirectory", () => {
       // The layout is not derivable from the import, so both candidates are
       // registered; a root that does not exist holds no files and matches
@@ -617,37 +672,56 @@ describe("graph-resolution", () => {
         "packages/pkg-a/pyproject.toml": "",
       });
 
-      expect(buildPythonImportRoots(project.root)).toEqual([
-        "packages/pkg-a",
-        "packages/pkg-a/src",
+      expect(buildPythonManifests(project.root)).toEqual([
+        { dir: "packages/pkg-a", roots: ["packages/pkg-a", "packages/pkg-a/src"], members: [] },
       ]);
     });
 
     it("maps a root-level manifest to '.' and 'src'", () => {
-      project = createTempProject({
-        "pyproject.toml": "",
-      });
+      project = createTempProject({ "pyproject.toml": "" });
 
-      expect(buildPythonImportRoots(project.root)).toEqual([".", "src"]);
+      expect(buildPythonManifests(project.root)).toEqual([
+        { dir: ".", roots: [".", "src"], members: [] },
+      ]);
     });
 
-    it("collects nested manifests, sorted and deduplicated", () => {
-      // Sorted so that when two roots hold the same top-level module name the
-      // same one wins on every machine.
+    it("resolves workspace member globs against the manifests found", () => {
       project = createTempProject({
-        "pyproject.toml": "",
+        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/*"]\n',
+        "packages/alpha/pyproject.toml": "",
         "packages/zeta/pyproject.toml": "",
+        "examples/demo/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual(["packages/alpha", "packages/zeta"]);
+    });
+
+    it("honours an exclude list alongside members", () => {
+      project = createTempProject({
+        "pyproject.toml":
+          '[tool.uv.workspace]\nmembers = ["packages/*"]\nexclude = ["packages/legacy"]\n',
+        "packages/alpha/pyproject.toml": "",
+        "packages/legacy/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual(["packages/alpha"]);
+    });
+
+    it("reads members only from the tool.uv.workspace table", () => {
+      // A `members` key under some other tool's table must not be mistaken for
+      // uv's, which is why the section is read only to the next table header.
+      project = createTempProject({
+        "pyproject.toml": '[tool.other]\nmembers = ["packages/*"]\n',
         "packages/alpha/pyproject.toml": "",
       });
 
-      expect(buildPythonImportRoots(project.root)).toEqual([
-        ".",
-        "packages/alpha",
-        "packages/alpha/src",
-        "packages/zeta",
-        "packages/zeta/src",
-        "src",
-      ]);
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual([]);
     });
 
     it("skips manifests under site-packages", () => {
@@ -660,7 +734,7 @@ describe("graph-resolution", () => {
         ".venv312/lib/python3.12/site-packages/requests/pyproject.toml": "",
       });
 
-      expect(buildPythonImportRoots(project.root)).toEqual([".", "src"]);
+      expect(buildPythonManifests(project.root).map((m) => m.dir)).toEqual(["."]);
     });
 
     it("skips manifests under dist-packages", () => {
@@ -672,7 +746,7 @@ describe("graph-resolution", () => {
         "vendored/lib/python3.12/dist-packages/requests/pyproject.toml": "",
       });
 
-      expect(buildPythonImportRoots(project.root)).toEqual([".", "src"]);
+      expect(buildPythonManifests(project.root).map((m) => m.dir)).toEqual(["."]);
     });
 
     it("skips manifests under ignored directories", () => {
@@ -681,17 +755,100 @@ describe("graph-resolution", () => {
         "node_modules/some-pkg/pyproject.toml": "",
       });
 
-      expect(buildPythonImportRoots(project.root)).toEqual([".", "src"]);
+      expect(buildPythonManifests(project.root).map((m) => m.dir)).toEqual(["."]);
     });
 
     it("returns an empty list for a project with no manifest", () => {
       // Keeps the resolver's pre-#107 behavior for unpackaged script repos:
-      // an empty list adds no resolution step at all.
-      project = createTempProject({
-        "app/main.py": "",
-      });
+      // no manifests means no roots and no extra resolution step at all.
+      project = createTempProject({ "app/main.py": "" });
 
-      expect(buildPythonImportRoots(project.root)).toEqual([]);
+      expect(buildPythonManifests(project.root)).toEqual([]);
+    });
+  });
+
+  describe("pythonRootsForFile", () => {
+    const manifests = (entries: Array<[string, string[]]>): PythonManifest[] =>
+      entries.map(([dir, members]) => ({
+        dir,
+        roots: [dir, dir === "." ? "src" : `${dir}/src`],
+        members,
+      }));
+
+    it("orders containing roots first, deepest first", () => {
+      // A package's own root must outrank the project root, or a name present
+      // in both resolves to the wrong one.
+      const roots = pythonRootsForFile(
+        manifests([[".", ["packages/pkg-a"]], ["packages/pkg-a", []]]),
+        "packages/pkg-a/src/pkg_a",
+      );
+
+      expect(roots.slice(0, 2)).toEqual(["packages/pkg-a/src", "packages/pkg-a"]);
+    });
+
+    it("puts a containing root ahead of one that sorts earlier alphabetically", () => {
+      // Containment must beat lexicographic order outright, not merely agree
+      // with it. pkg-z's own roots come first even though pkg-a sorts before
+      // them, which is the whole of the fix for the cross-service mixup.
+      const roots = pythonRootsForFile(
+        manifests([
+          [".", ["packages/pkg-a", "packages/pkg-z"]],
+          ["packages/pkg-a", []],
+          ["packages/pkg-z", []],
+        ]),
+        "packages/pkg-z/src/pkg_z",
+      );
+
+      expect(roots.slice(0, 2)).toEqual(["packages/pkg-z/src", "packages/pkg-z"]);
+      expect(roots.indexOf("packages/pkg-z")).toBeLessThan(roots.indexOf("packages/pkg-a"));
+    });
+
+    it("excludes a manifest that is neither an ancestor nor a declared member", () => {
+      // Only the root manifest's roots survive, and `src` precedes `.`
+      // because the file sits inside it — deepest containing root first.
+      const roots = pythonRootsForFile(
+        manifests([[".", []], ["examples/demo", []]]),
+        "src/mainpkg",
+      );
+
+      expect(roots).toEqual(["src", "."]);
+    });
+
+    it("includes a sibling package declared as a workspace member", () => {
+      const roots = pythonRootsForFile(
+        manifests([
+          [".", ["packages/pkg-a", "packages/pkg-b"]],
+          ["packages/pkg-a", []],
+          ["packages/pkg-b", []],
+        ]),
+        "packages/pkg-a/src/pkg_a",
+      );
+
+      expect(roots).toContain("packages/pkg-b/src");
+    });
+
+    it("orders non-containing roots lexicographically for cross-machine determinism", () => {
+      // Nothing about a cross-package import says which package was meant, so
+      // the tie must break the same way everywhere rather than by walk order.
+      const roots = pythonRootsForFile(
+        manifests([
+          [".", ["packages/pkg-b", "packages/pkg-c"]],
+          ["packages/pkg-b", []],
+          ["packages/pkg-c", []],
+        ]),
+        "app",
+      );
+
+      expect(roots.filter((r) => r.startsWith("packages/"))).toEqual([
+        "packages/pkg-b",
+        "packages/pkg-b/src",
+        "packages/pkg-c",
+        "packages/pkg-c/src",
+      ]);
+    });
+
+    it("returns nothing when no manifest applies", () => {
+      expect(pythonRootsForFile(manifests([["examples/demo", []]]), "src/app")).toEqual([]);
     });
   });
 

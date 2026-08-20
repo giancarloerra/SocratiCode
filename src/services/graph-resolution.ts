@@ -648,29 +648,179 @@ function findPyProjectManifests(projectPath: string): string[] {
  * importable surface and no directory bears the module's name. Trying each
  * root in turn covers both, and covers PEP 420 namespace packages (no
  * `__init__.py`) for free, since it never asks what a directory contains.
- * Manifest contents are never read, so no TOML parser is needed.
  *
- * Sorted so that when two roots hold the same top-level module name the same
- * one wins on every machine — resolveImport tries them in this order.
- *
- * A root-level manifest contributes `"."` and `"src"`, which duplicate the
- * project-root and `src/`+`lib/` probes resolveImport already ran before it
- * reaches these roots. The overlap is deliberate: this function describes
- * every root the manifests declare, and filtering it against what some caller
- * happens to try first would couple the two. The cost is two Set lookups on a
- * path that has already failed.
- *
- * Call this once per graph build and pass the result to resolveImport.
+ * The only part of a manifest that is read is its `[tool.uv.workspace]`
+ * member list, which {@link pythonRootsForFile} needs to tell a sibling
+ * package apart from an unrelated project that merely carries a manifest.
  */
-export function buildPythonImportRoots(projectPath: string): string[] {
-  const roots = new Set<string>();
+export interface PythonManifest {
+  /** Project-relative directory holding the manifest; `"."` at the root. */
+  dir: string;
+  /** Import roots it implies: its own directory and its `src/`. */
+  roots: string[];
+  /**
+   * Project-relative directories of the workspace members it declares,
+   * resolved against the manifests actually discovered. Empty for a manifest
+   * with no `[tool.uv.workspace]` section.
+   */
+  members: string[];
+}
+
+/**
+ * Discover every `pyproject.toml` in the tree and record, for each, the import
+ * roots it implies and the workspace members it declares.
+ *
+ * Sorted by directory so that when two manifests contribute a root holding the
+ * same top-level module name, the same one wins on every machine.
+ *
+ * Call this once per graph build and pass each file's scoped roots (see
+ * {@link pythonRootsForFile}) to resolveImport.
+ */
+export function buildPythonManifests(projectPath: string): PythonManifest[] {
   const root = path.resolve(projectPath);
-  for (const relManifest of findPyProjectManifests(root)) {
-    const manifestDir = toForwardSlash(path.dirname(relManifest)); // "." at the root
-    roots.add(manifestDir);
-    roots.add(manifestDir === "." ? "src" : `${manifestDir}/src`);
+  const relManifests = findPyProjectManifests(root);
+  const dirs = relManifests.map((m) => toForwardSlash(path.dirname(m))); // "." at the root
+
+  return relManifests.map((relManifest, i) => {
+    const dir = dirs[i];
+    let source = "";
+    try {
+      source = readFileSync(path.join(root, relManifest), "utf8");
+    } catch {
+      // Unreadable manifest still contributes its roots; it just declares no
+      // members, so it scopes to its own subtree.
+    }
+    return {
+      dir,
+      roots: [dir, dir === "." ? "src" : `${dir}/src`],
+      members: declaredWorkspaceMembers(source, dir, dirs),
+    };
+  });
+}
+
+/**
+ * Project-relative directories of the `[tool.uv.workspace]` members a manifest
+ * declares, selected from `allManifestDirs` — a member glob only matters here
+ * when a real manifest sits at the path it names.
+ *
+ * uv member entries are globs relative to the declaring manifest
+ * (`members = ["packages/*"]`), with an optional `exclude` list of the same
+ * shape. Only `*` (one path segment) and `**` (any number) are interpreted;
+ * every other character, `?` included, is matched literally, which is stricter
+ * than uv itself and can only ever drop a member rather than invent one.
+ *
+ * The section is located by its header and read only as far as the next
+ * top-level table, so a `members` key belonging to some other tool cannot be
+ * mistaken for this one. This is deliberately not a TOML parse: the file is
+ * read for one array of strings, in the same spirit as buildDartPackageMap
+ * reading a single anchored `name:`.
+ */
+function declaredWorkspaceMembers(
+  source: string,
+  manifestDir: string,
+  allManifestDirs: string[],
+): string[] {
+  const header = source.match(/^[ \t]*\[tool\.uv\.workspace\][ \t]*$/m);
+  if (header?.index === undefined) return [];
+  const rest = source.slice(header.index + header[0].length);
+  // Stop at the next top-level table header so a later section's keys are
+  // never read as this one's.
+  const nextSection = rest.match(/^[ \t]*\[/m);
+  const body = nextSection ? rest.slice(0, nextSection.index) : rest;
+
+  const listOf = (key: string): string[] => {
+    const m = body.match(new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*\\[([^\\]]*)\\]`, "m"));
+    if (!m) return [];
+    return [...m[1].matchAll(/['"]([^'"]*)['"]/g)].map((q) => q[1]);
+  };
+
+  // Split on the wildcards first and escape only the literal spans between
+  // them, so every other regex metacharacter — `?` included — matches itself.
+  const toRe = (pattern: string): RegExp => {
+    const quote = (literal: string) => literal.replace(/[.+^${}()|[\]\\?*]/g, "\\$&");
+    const body = pattern
+      .split("**")
+      .map((span) => span.split("*").map(quote).join("[^/]*"))
+      .join(".*");
+    return new RegExp(`^${body}$`);
+  };
+  const prefix = manifestDir === "." ? "" : `${manifestDir}/`;
+  const relativeToManifest = (dir: string): string | null => {
+    if (!prefix) return dir;
+    return dir.startsWith(prefix) ? dir.slice(prefix.length) : null;
+  };
+
+  const included = listOf("members").map((p) => toRe(p.replace(/\/+$/, "")));
+  if (included.length === 0) return [];
+  const excluded = listOf("exclude").map((p) => toRe(p.replace(/\/+$/, "")));
+
+  return allManifestDirs.filter((dir) => {
+    if (dir === manifestDir) return false;
+    const rel = relativeToManifest(dir);
+    if (rel === null) return false;
+    return included.some((re) => re.test(rel)) && !excluded.some((re) => re.test(rel));
+  });
+}
+
+/**
+ * The import roots that apply to one source file, nearest first.
+ *
+ * Two rules, each fixing a way a flat list of every root in the tree resolves
+ * an import to the wrong file:
+ *
+ * **Scope.** A manifest applies to a file only when it sits on the file's
+ * ancestor path, or when an ancestor manifest declares it as a workspace
+ * member. A repo's `examples/demo/pyproject.toml`, a checked-in `third_party/`
+ * sdist and an editable checkout inside an environment directory all carry
+ * manifests while sitting on no `sys.path` the file could import through;
+ * without this rule each one registers roots globally and turns an import that
+ * correctly resolved to nothing into a fabricated edge. Workspace members are
+ * the exception because that is exactly what a member declaration states: the
+ * sibling package IS importable from here, and resolving cross-package imports
+ * is what issue #107 is about.
+ *
+ * **Order.** Roots containing the file come first, deepest first, so a package
+ * resolves its own modules before a sibling's. Without this, a per-service
+ * monorepo of flat `uv init --app` services — each with its own `config.py` —
+ * resolved `import config` to whichever service sorted first alphabetically,
+ * drawing a confident edge into another service's file. Remaining in-scope
+ * roots follow lexicographically: they are the cross-package candidates, where
+ * nothing about the import says which package was meant, so the tie is broken
+ * the same way on every machine rather than left to walk order.
+ *
+ * `relSourceDir` is the file's directory, project-relative and
+ * forward-slashed, `"."` for a file at the root.
+ */
+export function pythonRootsForFile(
+  manifests: PythonManifest[],
+  relSourceDir: string,
+): string[] {
+  const isAncestorOf = (dir: string, target: string): boolean =>
+    dir === "." || dir === target || target.startsWith(`${dir}/`);
+
+  const ancestors = manifests.filter((m) => isAncestorOf(m.dir, relSourceDir));
+  const inScope = new Set(ancestors.map((m) => m.dir));
+  for (const m of ancestors) {
+    for (const member of m.members) inScope.add(member);
   }
-  return [...roots].sort();
+
+  const roots: string[] = [];
+  for (const m of manifests) {
+    if (inScope.has(m.dir)) roots.push(...m.roots);
+  }
+
+  const contains = (root: string): boolean =>
+    root === "." || relSourceDir === root || relSourceDir.startsWith(`${root}/`);
+
+  return [...new Set(roots)].sort((a, b) => {
+    const aContains = contains(a);
+    const bContains = contains(b);
+    if (aContains !== bContains) return aContains ? -1 : 1;
+    // Deepest containing root first; "." is the shallowest and sorts last
+    // among them, so a package's own root outranks the project root.
+    if (aContains) return b.length - a.length || a.localeCompare(b);
+    return a.localeCompare(b);
+  });
 }
 
 /**
@@ -762,39 +912,38 @@ export function resolveImport(
         if (inSrc) return inSrc;
       }
 
-      // Manifest-declared import roots (issue #107). The probe above only
-      // reaches `src/` and `lib/` at the project root, which is one layout of
-      // one packaged project; a workspace puts each package's modules under
-      // `<package>/src/` (or beside its own manifest), a path no
-      // module-name-shaped guess can reach.
+      // Sibling-flat fallback (issue #46). Common in service-style monorepos
+      // where each top-level directory is a runnable Python application root
+      // and `import config` from `service-a/main.py` means
+      // `service-a/config.py` because the file is run via `python main.py`
+      // from inside its own directory. resolveRelativePath also handles the
+      // `<sourceDir>/<module>/__init__.py` package case via its built-in
+      // Python init fallback.
       //
-      // Placed here deliberately, between the two existing steps. After the
-      // project-root and `src/`+`lib/` probes, so anything they resolved is
-      // untouched. Before the sibling-flat fallback, because a root a build
-      // manifest declares is evidence where the sibling guess is a heuristic
-      // about how a script happens to be run — so where both match, the
-      // declared root wins. That IS a behavior change for a repo that has
-      // both a manifest and the #46 sibling shape: such an import can now
-      // resolve to a different file than it did before. It is intended, and
-      // pinned by "prefers a manifest root over the sibling-flat guess".
+      // Ahead of the manifest-declared roots below, which is what CPython
+      // does: sys.path[0] is the script's own directory, ahead of every
+      // installed-distribution entry, so where a sibling file and a package
+      // root both offer the module, the sibling is what actually gets
+      // imported.
+      const sibling = resolveRelativePath(modulePath, sourceDir, projectPath, fileSet, [".py"]);
+      if (sibling) return sibling;
+
+      // Manifest-declared import roots (issue #107), nearest first. The probes
+      // above reach `src/` and `lib/` at the project root and the importing
+      // file's own directory; neither reaches `<package>/src/`, where a
+      // workspace puts each package's modules, so cross-package imports and a
+      // package's own absolute self-imports resolved to nothing.
+      //
+      // The list is already scoped to this file and ordered by proximity by
+      // pythonRootsForFile — a root that is not on the file's ancestor path
+      // and not a declared workspace member never appears here, and a package's
+      // own root is tried before a sibling package's.
       for (const importRoot of pythonImportRoots ?? []) {
         const inRoot = resolveRelativePath(
           path.posix.join(importRoot, modulePath), projectPath, projectPath, fileSet, [".py"],
         );
         if (inRoot) return inRoot;
       }
-
-      // Sibling-flat fallback (issue #46). Common in service-style monorepos
-      // where each top-level directory is a runnable Python application root
-      // and `import config` from `service-a/main.py` means
-      // `service-a/config.py` because the file is run via `python main.py`
-      // from inside its own directory. Tried after the manifest-declared
-      // roots above and after the project-root probes, so it stays the
-      // last-resort guess it was introduced as. resolveRelativePath
-      // also handles the `<sourceDir>/<module>/__init__.py` package case
-      // via its built-in Python init fallback.
-      const sibling = resolveRelativePath(modulePath, sourceDir, projectPath, fileSet, [".py"]);
-      if (sibling) return sibling;
 
       return null;
     }
