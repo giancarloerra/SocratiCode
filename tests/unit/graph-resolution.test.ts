@@ -672,17 +672,19 @@ describe("graph-resolution", () => {
         "packages/pkg-a/pyproject.toml": "",
       });
 
-      expect(buildPythonManifests(project.root)).toEqual([
-        { dir: "packages/pkg-a", roots: ["packages/pkg-a", "packages/pkg-a/src"], members: [] },
-      ]);
+      const [manifest] = buildPythonManifests(project.root);
+
+      expect(manifest.dir).toBe("packages/pkg-a");
+      expect(manifest.roots).toEqual(["packages/pkg-a", "packages/pkg-a/src"]);
     });
 
     it("maps a root-level manifest to '.' and 'src'", () => {
       project = createTempProject({ "pyproject.toml": "" });
 
-      expect(buildPythonManifests(project.root)).toEqual([
-        { dir: ".", roots: [".", "src"], members: [] },
-      ]);
+      const [manifest] = buildPythonManifests(project.root);
+
+      expect(manifest.dir).toBe(".");
+      expect(manifest.roots).toEqual([".", "src"]);
     });
 
     it("resolves workspace member globs against the manifests found", () => {
@@ -704,6 +706,66 @@ describe("graph-resolution", () => {
           '[tool.uv.workspace]\nmembers = ["packages/*"]\nexclude = ["packages/legacy"]\n',
         "packages/alpha/pyproject.toml": "",
         "packages/legacy/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual(["packages/alpha"]);
+    });
+
+    it("reads members from a header carrying a trailing comment", () => {
+      // TOML's grammar allows a comment after a table header. Anchoring the
+      // header to end-of-line rejected the commented form, and because a
+      // manifest with no readable members simply scopes to its own subtree,
+      // the failure was silent: every cross-package import went back to null.
+      project = createTempProject({
+        "pyproject.toml": '[tool.uv.workspace]  # the workspace root\nmembers = ["packages/*"]\n',
+        "packages/alpha/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual(["packages/alpha"]);
+    });
+
+    it("does not read a quoted word inside a comment as a member", () => {
+      // A comment sitting in the array would otherwise contribute its quoted
+      // text as a member glob.
+      project = createTempProject({
+        "pyproject.toml":
+          '[tool.uv.workspace]\nmembers = [\n  "packages/*",  # not "examples/demo"\n]\n',
+        "packages/alpha/pyproject.toml": "",
+        "examples/demo/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual(["packages/alpha"]);
+    });
+
+    it("keeps well-formed members when another entry contains a bracket", () => {
+      // Ending the array span at the first `]` in the text cut it inside the
+      // string, leaving no closing quote — so every member was lost, not just
+      // the bracketed one. The character class itself selects nothing (only
+      // `*` and `**` are interpreted), but it must not take its neighbours
+      // down with it.
+      project = createTempProject({
+        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/[ab]*", "packages/*"]\n',
+        "packages/alpha/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual(["packages/alpha"]);
+    });
+
+    it("keeps well-formed members past an unbalanced bracket in a string", () => {
+      // The bracket above is balanced, so counting brackets would survive it
+      // too; only treating a string as opaque survives this one. Without that,
+      // the span ends mid-string and every member is lost.
+      project = createTempProject({
+        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/a]b", "packages/*"]\n',
+        "packages/alpha/pyproject.toml": "",
       });
 
       const root = buildPythonManifests(project.root).find((m) => m.dir === ".");

@@ -619,39 +619,8 @@ function findPyProjectManifests(projectPath: string): string[] {
 }
 
 /**
- * List every directory an absolute Python import may be rooted at, derived
- * from the `pyproject.toml` manifests in the tree (project-relative,
- * forward-slash, sorted; `"."` for a root-level manifest).
- *
- * A packaged Python project puts its importable modules under the manifest's
- * directory in one of two layouts: `src/` (what `uv init --lib`, hatchling
- * and setuptools all generate) or flat, directly beside the manifest. Neither
- * is derivable from the import itself. `from usa_wa_adapter_sos.house import
- * build` names no directory that appears in
- * `packages/usa-wa-adapter-sos/src/usa_wa_adapter_sos/house/build.py`: the
- * distribution directory is dashed, the module is underscored, and `src/`
- * sits between them. The resolver's existing project-root `src/`+`lib/` probe
- * only reaches a single-package repo, so in a workspace every cross-package
- * import — and every package's own absolute self-import — resolved to null
- * (issue #107). A 362-file uv workspace built 3 edges.
- *
- * Both roots are registered per manifest without probing the filesystem for
- * which layout is in use: a root that does not exist holds no files, so it
- * matches nothing, and the check would cost a `stat` per manifest to remove
- * lookups that already miss.
- *
- * Roots are registered rather than module names enumerated under them. Names
- * would have to come from the directories actually present — a distribution
- * name and its import name are not reliably related (Pillow imports as `PIL`),
- * so `[project] name` cannot supply them — and enumerating directories alone
- * would miss single-module distributions, where `src/mymodule.py` is the whole
- * importable surface and no directory bears the module's name. Trying each
- * root in turn covers both, and covers PEP 420 namespace packages (no
- * `__init__.py`) for free, since it never asks what a directory contains.
- *
- * The only part of a manifest that is read is its `[tool.uv.workspace]`
- * member list, which {@link pythonRootsForFile} needs to tell a sibling
- * package apart from an unrelated project that merely carries a manifest.
+ * One `pyproject.toml` found in the tree: where it sits, the import roots it
+ * implies, and the sibling packages it declares importable.
  */
 export interface PythonManifest {
   /** Project-relative directory holding the manifest; `"."` at the root. */
@@ -669,6 +638,36 @@ export interface PythonManifest {
 /**
  * Discover every `pyproject.toml` in the tree and record, for each, the import
  * roots it implies and the workspace members it declares.
+ *
+ * A packaged Python project puts its importable modules under the manifest's
+ * directory in one of two layouts: `src/` (what `uv init --lib`, hatchling
+ * and setuptools all generate) or flat, directly beside the manifest. Neither
+ * is derivable from the import itself. `from usa_wa_adapter_sos.house import
+ * build` names no directory that appears in
+ * `packages/usa-wa-adapter-sos/src/usa_wa_adapter_sos/house/build.py`: the
+ * distribution directory is dashed, the module is underscored, and `src/`
+ * sits between them. The resolver's existing project-root `src/`+`lib/` probe
+ * only reaches a single-package repo, so in a workspace every cross-package
+ * import — and every package's own absolute self-import — resolved to null
+ * (issue #107). A 362-file uv workspace built 3 edges.
+ *
+ * Both roots are recorded per manifest without probing the filesystem for
+ * which layout is in use: a root that does not exist holds no files, so it
+ * matches nothing, and the check would cost a `stat` per manifest to remove
+ * lookups that already miss.
+ *
+ * Roots are recorded rather than module names enumerated under them. Names
+ * would have to come from the directories actually present — a distribution
+ * name and its import name are not reliably related (Pillow imports as `PIL`),
+ * so `[project] name` cannot supply them — and enumerating directories alone
+ * would miss single-module distributions, where `src/mymodule.py` is the whole
+ * importable surface and no directory bears the module's name. Trying each
+ * root in turn covers both, and covers PEP 420 namespace packages (no
+ * `__init__.py`) for free, since it never asks what a directory contains.
+ *
+ * The only part of a manifest that is read is its `[tool.uv.workspace]`
+ * member list, which {@link pythonRootsForFile} needs to tell a sibling
+ * package apart from an unrelated project that merely carries a manifest.
  *
  * Sorted by directory so that when two manifests contribute a root holding the
  * same top-level module name, the same one wins on every machine.
@@ -714,24 +713,69 @@ export function buildPythonManifests(projectPath: string): PythonManifest[] {
  * mistaken for this one. This is deliberately not a TOML parse: the file is
  * read for one array of strings, in the same spirit as buildDartPackageMap
  * reading a single anchored `name:`.
+ *
+ * Comments are handled in both places TOML allows them to break this: after
+ * the table header, which the grammar permits and an end-of-line anchor would
+ * reject, and inside the array, where a quoted word in a comment would
+ * otherwise be read as a member.
+ *
+ * What this reader does NOT understand, all of which drop members rather than
+ * invent them — and all of which are silent, because a manifest with no
+ * readable members simply scopes to its own subtree:
+ *
+ *   - a `#` inside a member string, which comment-stripping truncates;
+ *   - an escaped quote inside a member string (`"pack\"ages/*"`), which ends
+ *     the string early for the array scan;
+ *   - multi-line basic strings, and any member spelled other than as a single
+ *     quoted scalar;
+ *   - glob syntax beyond `*` and `**` — a character class such as
+ *     `packages/[ab]*` is matched literally and so selects nothing.
+ *
+ * Every one of these is legal TOML that no real workspace manifest is likely
+ * to contain. The line is drawn here because the alternative is a TOML parser,
+ * and this file is read for exactly one array of strings.
  */
+// Array-valued keys read out of `[tool.uv.workspace]`. Hoisted so the pattern
+// is a literal a reader can check once, rather than a string built per call.
+// Neither carries /g, so neither holds lastIndex state between matches.
+const WORKSPACE_MEMBERS_KEY = /^[ \t]*members[ \t]*=[ \t]*\[/m;
+const WORKSPACE_EXCLUDE_KEY = /^[ \t]*exclude[ \t]*=[ \t]*\[/m;
+
 function declaredWorkspaceMembers(
   source: string,
   manifestDir: string,
   allManifestDirs: string[],
 ): string[] {
-  const header = source.match(/^[ \t]*\[tool\.uv\.workspace\][ \t]*$/m);
+  const header = source.match(/^[ \t]*\[tool\.uv\.workspace\][ \t]*(?:#.*)?$/m);
   if (header?.index === undefined) return [];
   const rest = source.slice(header.index + header[0].length);
   // Stop at the next top-level table header so a later section's keys are
   // never read as this one's.
   const nextSection = rest.match(/^[ \t]*\[/m);
-  const body = nextSection ? rest.slice(0, nextSection.index) : rest;
+  const section = nextSection ? rest.slice(0, nextSection.index) : rest;
+  const body = section.replace(/#.*$/gm, "");
 
-  const listOf = (key: string): string[] => {
-    const m = body.match(new RegExp(`^[ \\t]*${key}[ \\t]*=[ \\t]*\\[([^\\]]*)\\]`, "m"));
-    if (!m) return [];
-    return [...m[1].matchAll(/['"]([^'"]*)['"]/g)].map((q) => q[1]);
+  const listOf = (keyRe: RegExp): string[] => {
+    const m = body.match(keyRe);
+    if (m?.index === undefined) return [];
+    // Walk to the first `]` that sits outside a string, rather than to the
+    // first `]` in the text: a `]` inside a member string would otherwise end
+    // the span early, and the truncated span has no closing quote, so EVERY
+    // member is lost — including well-formed ones sharing the array.
+    const start = m.index + m[0].length;
+    let end = start;
+    let quote = "";
+    for (; end < body.length; end++) {
+      const ch = body[end];
+      if (quote) {
+        if (ch === quote) quote = "";
+      } else if (ch === '"' || ch === "'") {
+        quote = ch;
+      } else if (ch === "]") {
+        break;
+      }
+    }
+    return [...body.slice(start, end).matchAll(/['"]([^'"]*)['"]/g)].map((q) => q[1]);
   };
 
   // Split on the wildcards first and escape only the literal spans between
@@ -750,9 +794,9 @@ function declaredWorkspaceMembers(
     return dir.startsWith(prefix) ? dir.slice(prefix.length) : null;
   };
 
-  const included = listOf("members").map((p) => toRe(p.replace(/\/+$/, "")));
+  const included = listOf(WORKSPACE_MEMBERS_KEY).map((p) => toRe(p.replace(/\/+$/, "")));
   if (included.length === 0) return [];
-  const excluded = listOf("exclude").map((p) => toRe(p.replace(/\/+$/, "")));
+  const excluded = listOf(WORKSPACE_EXCLUDE_KEY).map((p) => toRe(p.replace(/\/+$/, "")));
 
   return allManifestDirs.filter((dir) => {
     if (dir === manifestDir) return false;
