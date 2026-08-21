@@ -187,7 +187,7 @@ export function generateMermaidDiagram(graph: CodeGraph): string {
     rust: "#CE422B", ruby: "#CC342D", php: "#777BB4",
     swift: "#FA7343", c: "#A8B9CC", cpp: "#00599C",
     csharp: "#239120", scala: "#DC322F", dart: "#0175C2",
-    lua: "#2C2D72", shell: "#4EAA25",
+    elixir: "#4B275F", lua: "#2C2D72", shell: "#4EAA25",
   };
 
   // Create safe node IDs and labels

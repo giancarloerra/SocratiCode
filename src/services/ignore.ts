@@ -22,6 +22,8 @@ const DEFAULT_IGNORE_PATTERNS = [
   "env",
   ".tox",
   "target",
+  "_build",
+  "deps",
   "bin/Debug",
   "bin/Release",
   "obj",
