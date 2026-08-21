@@ -966,7 +966,7 @@ SocratiCode supports languages at three levels:
 
 ### Full Support (indexing + code graph + AST chunking)
 
-JavaScript, TypeScript, TSX, Python, Java, Kotlin, Scala, C, C++, C#, Go, Rust, Ruby, PHP, Swift, Dart, Elixir, Bash/Shell, HTML, CSS/SCSS, Svelte, Vue
+JavaScript, TypeScript, TSX, Python, Java, Kotlin, Scala, C, C++, C#, Go, Rust, Ruby, PHP, Swift, Dart, Elixir (including HEEx/EEx), Bash/Shell, HTML, CSS/SCSS, Svelte, Vue
 
 Svelte and Vue: imports extracted from `<script>` blocks (re-parsed as TypeScript) and CSS `@import`/`@require` from `<style>` blocks (any combination of `lang`, `scoped`, `module`, `global` attributes). Path aliases from `tsconfig.json`/`jsconfig.json` `compilerOptions.paths` are resolved (including `extends` chains). SCSS partial resolution (`_` prefix convention) is supported.
 
@@ -974,7 +974,7 @@ Python: absolute imports resolve through the import roots implied by the project
 
 Dart: symbols (classes, mixins, enums, extensions, typedefs, functions, getters, setters, operators, constructors including named and factory, and abstract/bodyless members), call sites (method calls, cascades, constructor invocations), `main()` entry-point detection, and AST chunking are all tree-sitter based; import/export/part edges are extracted via regex. Intra-project `package:` imports (the Flutter convention) resolve through the project's `pubspec.yaml` files — root and nested, so pub-workspace/melos monorepos get cross-package edges — via pub's `package:<name>/<rest>` → `<package_root>/lib/<rest>` mapping; `dart:` and unknown package names stay external. The bundled grammar (`@ast-grep/lang-dart`) predates Dart 3 class modifiers (`sealed`/`base`/`interface`/`final`/`mixin class`) and `extension type`: declarations using those are skipped (with a one-time warning logged) until the upstream grammar is updated, while the rest of each file still indexes normally.
 
-Elixir: `.ex` and `.exs` files use the ast-grep grammar for chunking. `alias`, `import`, `require`, and `use` directives resolve to in-project `defmodule` declarations; `defmodule`, `def`, `defp`, and ordinary calls produce symbols and call edges. HEEx/EEx and Phoenix component resolution are out of scope.
+Elixir: `.ex` and `.exs` files use the ast-grep grammar for chunking. `alias`, `import`, `require`, and `use` directives resolve to in-project `defmodule` declarations; `defmodule`, `def`, `defp`, and ordinary calls produce symbols and call edges. Chunking is module-level, with large modules falling back to line windows rather than per-function chunks. `defprotocol` and `defimpl` do not create module scopes yet, so functions inside them appear as top-level symbols. Standalone `.heex` and `.eex` templates use dedicated tree-sitter grammars for AST chunking, remote-component dependencies, and calls from embedded Elixir expressions; markup and comments are never parsed as Elixir. `.leex` uses the EEx grammar on a best-effort basis, safely falling back to line chunks and no extracted edges when parsing fails.
 
 ### Code Graph via Regex + Indexing
 
@@ -984,7 +984,7 @@ Lua (require/dofile/loadfile), SASS, LESS, Stylus (CSS `@import`/`@require` extr
 
 JSON, YAML, TOML, XML, INI/CFG, Markdown/MDX, RST, SQL, R, Dockerfile, TXT, and any file matching a supported extension or special filename (Dockerfile, Makefile, Gemfile, Rakefile, etc.)
 
-**55 file extensions** + 8 special filenames supported out of the box.
+**60 file extensions** + 8 special filenames supported out of the box.
 
 Extensionless files (Unix scripts, health probes, sourced libraries) are also indexed via content-based language detection when `INDEX_EXTENSIONLESS` is enabled (the default) — see that environment variable below.
 
