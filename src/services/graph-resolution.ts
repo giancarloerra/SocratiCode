@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { type Dirent, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
+import { parse as parseToml, type TomlTable, type TomlValue } from "smol-toml";
 import { toForwardSlash } from "../constants.js";
 import type { PathAliases } from "./graph-aliases.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
@@ -697,104 +698,105 @@ export function buildPythonManifests(projectPath: string): PythonManifest[] {
   });
 }
 
-// Keys and header read out of `[tool.uv.workspace]`. Hoisted so each pattern is
-// a literal a reader can check once, rather than a string built per call. None
-// carries /g, so none holds lastIndex state between matches.
-const WORKSPACE_HEADER = /^[ \t]*\[tool\.uv\.workspace\][ \t]*(?:#.*)?$/m;
-const WORKSPACE_MEMBERS_KEY = /^[ \t]*members[ \t]*=[ \t]*\[/m;
-const WORKSPACE_EXCLUDE_KEY = /^[ \t]*exclude[ \t]*=[ \t]*\[/m;
+/**
+ * A parsed TOML table as this reader consumes it. {@link TomlTable} has no
+ * undefined member, but reading a key a manifest does not carry yields one, and
+ * that is precisely what the checks around every lookup are checking for — so
+ * the type has to be able to say it.
+ */
+type ReadTable = Record<string, TomlValue | undefined>;
 
 /**
- * Blank the interior of every TOML multi-line string (`"""…"""`, `'''…'''`),
- * preserving length and newlines so offsets and line anchors still line up
- * with the original text.
+ * The `[tool.uv.workspace]` table of one manifest, or null when the document
+ * declares none — including when it cannot be parsed at all.
  *
- * A table header only counts when it is a real header. `[tool.uv.workspace]`
- * written on its own line inside a `description = """…"""` block is prose, and
- * `tomllib` reports no such table for it, but a line-anchored regex over the
- * raw text cannot tell the two apart and would read the prose as a
- * declaration — inventing members and widening roots for a manifest that
- * declares none.
+ * Reading this by pattern-matching was a losing position. The cases that kept
+ * surfacing were not edges but the lexer: a `# """` comment masking a valid
+ * table, and `members = ["a" "b"]` inventing a member out of a document uv
+ * rejects outright. Tracking comment and string state is the first thing a TOML
+ * parser does and the last thing a scanner can bolt on, and under the
+ * narrow-never-widen invariant every remaining gap had to be paid for by
+ * voiding — real edges lost in manifests that were perfectly valid.
+ *
+ * Parsing settles the lexing, and the walk below covers every legal spelling of
+ * the same declaration for free: `[ tool.uv.workspace ]`, a `[tool.uv]` table
+ * carrying `workspace = { members = [...] }`, and a top-level
+ * `tool.uv.workspace.members` dotted key all arrive as the same nested tables.
+ * Each is ordinary TOML that a user can write today, that uv reads as a
+ * workspace, and that the previous reader silently found no members in — the
+ * same failure shape as issue #107 itself.
+ *
+ * A malformed manifest declares nothing rather than failing the build: one
+ * unparseable `pyproject.toml` anywhere in the tree must not cost the whole
+ * project its Python edges, which is why an unreadable file is skipped in
+ * {@link buildPythonManifests} too.
+ *
+ * A leading byte-order mark is stripped first. Both this parser and `tomllib`
+ * reject one, since the TOML grammar has no place for it, but uv's parser skips
+ * it and locks the workspace normally — so without stripping, a manifest saved
+ * with a BOM would lose every member it declares. uv's behaviour is the one
+ * being modelled.
  */
-function maskMultilineStrings(source: string): string {
-  let out = "";
-  let i = 0;
-  while (i < source.length) {
-    const three = source.slice(i, i + 3);
-    if (three === '"""' || three === "'''") {
-      const close = source.indexOf(three, i + 3);
-      const end = close === -1 ? source.length : close + 3;
-      for (let j = i; j < end; j++) out += source[j] === "\n" ? "\n" : " ";
-      i = end;
-      continue;
-    }
-    out += source[i];
-    i++;
+function workspaceTable(source: string): ReadTable | null {
+  let cursor: TomlValue | undefined;
+  try {
+    cursor = parseToml(source.replace(/^\uFEFF/, ""));
+  } catch {
+    return null;
   }
-  return out;
+  // A missing key yields undefined, which the next step rejects, so one check
+  // per step covers both a key that is absent and a value that cannot hold one.
+  //
+  // These lookups read through the prototype chain, since the parser returns
+  // plain objects rather than null-prototype ones. None of the five names this
+  // reader asks for \u2014 tool, uv, workspace, members, exclude \u2014 exists on
+  // Object.prototype, so no manifest can reach an inherited value, and an
+  // own-key check ahead of each one could never change an outcome.
+  for (const key of ["tool", "uv", "workspace"]) {
+    if (!isTable(cursor)) return null;
+    const table: ReadTable = cursor;
+    cursor = table[key];
+  }
+  return isTable(cursor) ? cursor : null;
 }
 
-/** A `members`/`exclude` array read out of the section, or why it was not. */
-type ArrayScan =
-  | { kind: "entries"; entries: string[] }
-  /** The key is not present. Distinct from an empty array. */
-  | { kind: "absent" }
-  /** Present but not faithfully readable — the caller must void the section. */
-  | { kind: "unsupported" };
+/**
+ * Whether a parsed value can be looked up by key. A TOML date parses to an
+ * object and passes this too, but no key can be found under one, so it reaches
+ * the same void as any other undeclared workspace.
+ */
+function isTable(value: TomlValue | undefined): value is TomlTable {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
 
 /**
- * Read one array of quoted scalars, treating strings as opaque.
+ * One `members`/`exclude` value as patterns this reader can apply, or null when
+ * it cannot apply them faithfully — the caller's signal to void.
  *
- * Comments are skipped between entries but never inside a string, so a `#` in
- * a member path survives and a quoted word in a trailing comment is not
- * mistaken for an entry. A bare or unterminated value is reported as
- * `unsupported` rather than approximated.
- *
- * A newline inside a quoted value is not itself rejected: the value simply
- * carries it, and no directory name can contain one, so such an entry matches
- * nothing either way. What actually terminates the scan is running out of
- * section without a closing quote.
+ * Null covers three shapes that mean the same thing here: the key is absent, it
+ * holds something other than an array of strings, or an entry uses glob syntax
+ * beyond the `*` and `**` translated below. The caller separates out an absent
+ * `exclude` before asking, since that is an ordinary manifest excluding
+ * nothing rather than an unreadable one.
  */
-function scanStringArray(section: string, keyRe: RegExp): ArrayScan {
-  const m = section.match(keyRe);
-  if (m?.index === undefined) return { kind: "absent" };
-  let i = m.index + m[0].length; // just past the opening bracket
-  const entries: string[] = [];
-
-  for (;;) {
-    // Between entries: whitespace, separators and comments.
-    while (i < section.length) {
-      const ch = section[i];
-      if (ch === "#") {
-        while (i < section.length && section[i] !== "\n") i++;
-      } else if (ch === "," || ch === " " || ch === "\t" || ch === "\n" || ch === "\r") {
-        i++;
-      } else break;
-    }
-    if (i >= section.length) return { kind: "unsupported" }; // array never closed
-    if (section[i] === "]") return { kind: "entries", entries };
-
-    const quote = section[i];
-    if (quote !== '"' && quote !== "'") return { kind: "unsupported" }; // non-string entry
-    i++;
-    let value = "";
-    for (;;) {
-      if (i >= section.length) return { kind: "unsupported" };
-      const ch = section[i];
-      i++;
-      if (ch === quote) break;
-      value += ch;
-    }
-    entries.push(value);
+function patternList(value: TomlValue | undefined): string[] | null {
+  // A type predicate rather than a cast, so the narrowing is proven by the same
+  // check that guards it — the invariant rests on this one holding.
+  if (!Array.isArray(value) || !value.every((entry): entry is string => typeof entry === "string")) {
+    return null;
   }
+  return value.some(usesUnsupportedGlob) ? null : value;
 }
 
 /**
  * Whether a member pattern uses glob syntax beyond the `*` and `**` this
  * reader translates. uv matches with a full globset, so a character class,
  * a `?`, a brace alternation or an escape selects a different set than a
- * literal reading of the same text would. This is also what rejects a
- * backslash escape, so the scanner does not need its own check for one.
+ * literal reading of the same text would.
+ *
+ * The pattern examined here is the parsed value, so a TOML escape sequence has
+ * already been resolved: `"packages/a\\b"` arrives carrying one backslash,
+ * which globset reads as an escape and this check rejects.
  */
 function usesUnsupportedGlob(pattern: string): boolean {
   return /[?[\]{}\\]/.test(pattern);
@@ -809,17 +811,15 @@ function usesUnsupportedGlob(pattern: string): boolean {
  * (`members = ["packages/*"]`), with an optional `exclude` list of the same
  * shape. Only `*` (one path segment) and `**` (any number) are translated.
  *
- * The section is located by its header and read only as far as the next
- * top-level table, so a `members` key belonging to some other tool cannot be
- * mistaken for this one. This is deliberately not a TOML parse: the file is
- * read for one array of strings, in the same spirit as buildDartPackageMap
- * reading a single anchored `name:`.
+ * The document is parsed rather than scanned (see {@link workspaceTable}), so
+ * a `members` key belonging to some other tool is a different key rather than
+ * nearby text, and only glob translation is left to approximate.
  *
  * **The invariant is that this reader may narrow what a manifest declares,
  * never widen it**, and the whole section is voided the moment it meets
- * anything it cannot represent exactly: a multi-line string span, an entry
- * that is not a single quoted scalar, an escape, or glob syntax beyond `*`
- * and `**`. Voiding falls back to ancestor-path scoping, which resolves
+ * anything it cannot represent exactly: an unparseable document, a `members`
+ * or `exclude` value that is not an array of strings, or glob syntax beyond
+ * `*` and `**`. Voiding falls back to ancestor-path scoping, which resolves
  * strictly fewer imports.
  *
  * The invariant has to hold for `exclude` as well as `members`, and that is
@@ -841,34 +841,17 @@ function declaredWorkspaceMembers(
   manifestDir: string,
   allManifestDirs: string[],
 ): string[] {
-  // Header discovery runs over masked text so prose cannot pose as a table;
-  // masking preserves length, so offsets still index the original.
-  const masked = maskMultilineStrings(source);
-  const header = masked.match(WORKSPACE_HEADER);
-  if (header?.index === undefined) return [];
-  const from = header.index + header[0].length;
-  const rest = masked.slice(from);
-  // Stop at the next top-level table header so a later section's keys are
-  // never read as this one's.
-  const nextSection = rest.match(/^[ \t]*\[/m);
-  const to = nextSection?.index === undefined ? source.length : from + nextSection.index;
-  // Masked, not raw: a multi-line string inside this table is blanked, so its
-  // contents cannot pose as entries and a legitimate `members` beside it still
-  // reads. An entry spelled as a multi-line string blanks to nothing and the
-  // array comes back empty, which voids by the same path as any other
-  // unreadable declaration.
-  const section = masked.slice(from, to);
+  const workspace = workspaceTable(source);
+  if (workspace === null) return [];
 
-  const membersScan = scanStringArray(section, WORKSPACE_MEMBERS_KEY);
-  const excludeScan = scanStringArray(section, WORKSPACE_EXCLUDE_KEY);
-  if (membersScan.kind === "unsupported" || excludeScan.kind === "unsupported") return [];
-  if (membersScan.kind === "absent") return [];
-
-  const memberPatterns = membersScan.entries;
-  const excludePatterns = excludeScan.kind === "entries" ? excludeScan.entries : [];
-  if (memberPatterns.some(usesUnsupportedGlob) || excludePatterns.some(usesUnsupportedGlob)) {
-    return [];
-  }
+  const memberPatterns = patternList(workspace.members);
+  if (memberPatterns === null) return [];
+  // An absent `exclude` is an ordinary manifest excluding nothing. One that is
+  // present and unreadable voids alongside `members`, since ignoring it would
+  // admit exactly the package the manifest set out to keep out. TOML has no
+  // null, so an undefined value here can only mean the key is absent.
+  const excludePatterns = workspace.exclude === undefined ? [] : patternList(workspace.exclude);
+  if (excludePatterns === null) return [];
 
   // Split on the wildcards first and quote only the literal spans between
   // them, so every other regex metacharacter matches itself.

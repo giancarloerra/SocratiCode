@@ -29,6 +29,7 @@ ignore                            MIT License
 ollama (JS client)                MIT License
 openai                            Apache License 2.0
 proper-lockfile                   MIT License
+smol-toml                         BSD 3-Clause License
 zod                               MIT License
 
 DEVELOPMENT DEPENDENCIES
