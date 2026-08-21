@@ -749,7 +749,7 @@ function workspaceTable(source: string): ReadTable | null {
   //
   // These lookups read through the prototype chain, since the parser returns
   // plain objects rather than null-prototype ones. None of the five names this
-  // reader asks for \u2014 tool, uv, workspace, members, exclude \u2014 exists on
+  // reader asks for — tool, uv, workspace, members, exclude — exists on
   // Object.prototype, so no manifest can reach an inherited value, and an
   // own-key check ahead of each one could never change an outcome.
   for (const key of ["tool", "uv", "workspace"]) {
@@ -809,7 +809,8 @@ function usesUnsupportedGlob(pattern: string): boolean {
  *
  * uv member entries are globs relative to the declaring manifest
  * (`members = ["packages/*"]`), with an optional `exclude` list of the same
- * shape. Only `*` (one path segment) and `**` (any number) are translated.
+ * shape. Only `*` and `**` are translated, and a lone `*` does not mean the
+ * same thing in the two lists — see the note beside the translation below.
  *
  * The document is parsed rather than scanned (see {@link workspaceTable}), so
  * a `members` key belonging to some other tool is a different key rather than
@@ -854,12 +855,18 @@ function declaredWorkspaceMembers(
   if (excludePatterns === null) return [];
 
   // Split on the wildcards first and quote only the literal spans between
-  // them, so every other regex metacharacter matches itself.
-  const toRe = (pattern: string): RegExp => {
+  // them, so every other regex metacharacter matches itself. `**` always
+  // spans separators; what a lone `*` spans is `singleStar`, and the two
+  // sides of the declaration do not agree on it. Naming both spellings in the
+  // type rejects a fragment that is neither — a `".+"` or a `"[^/]"` that
+  // would quietly change what every pattern matches. It does not stop the two
+  // being transposed, since each is valid at either call site; the tests that
+  // assert each side separately are what pin that.
+  const toRe = (pattern: string, singleStar: "[^/]*" | ".*"): RegExp => {
     const quote = (literal: string) => literal.replace(/[.+^${}()|[\]\\?*]/g, "\\$&");
     const body = pattern
       .split("**")
-      .map((span) => span.split("*").map(quote).join("[^/]*"))
+      .map((span) => span.split("*").map(quote).join(singleStar))
       .join(".*");
     return new RegExp(`^${body}$`);
   };
@@ -869,9 +876,23 @@ function declaredWorkspaceMembers(
     return dir.startsWith(prefix) ? dir.slice(prefix.length) : null;
   };
 
-  const included = memberPatterns.map((p) => toRe(p.replace(/\/+$/, "")));
+  // uv expands `members` by globbing the filesystem, where a lone `*` selects
+  // one path segment, and matches `exclude` as a pattern against the member's
+  // whole path, where it does not stop at a separator. Two code paths, two
+  // meanings for the same character: `members = ["packages/*"]` leaves
+  // `packages/alpha/inner` out, while `exclude = ["*legacy"]` takes
+  // `packages/legacy` and `exclude = ["*"]` empties the workspace.
+  //
+  // Checked on uv 0.10.0 and 0.11.8, which agree on every one of these, so
+  // this is uv's model rather than one release's behaviour.
+  //
+  // The asymmetry has to be honoured because the invariant is not symmetric.
+  // A narrow `*` on the include side registers fewer roots than uv, which
+  // costs at most an edge. A narrow `*` on the exclude side fails to exclude,
+  // which admits a package the manifest named and draws an edge uv would not.
+  const included = memberPatterns.map((p) => toRe(p.replace(/\/+$/, ""), "[^/]*"));
   if (included.length === 0) return [];
-  const excluded = excludePatterns.map((p) => toRe(p.replace(/\/+$/, "")));
+  const excluded = excludePatterns.map((p) => toRe(p.replace(/\/+$/, ""), ".*"));
 
   return allManifestDirs.filter((dir) => {
     if (dir === manifestDir) return false;

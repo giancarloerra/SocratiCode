@@ -1490,7 +1490,7 @@ Copyright (C) 2026 Giancarlo Erra - Altaire Limited.
 ### Third-Party Licenses
 
 SocratiCode includes open-source dependencies under their own licenses
-(MIT, Apache 2.0, ISC). See [THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES) for details.
+(MIT, Apache 2.0, ISC, BSD 3-Clause). See [THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES) for details.
 
 ### Contributing
 

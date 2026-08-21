@@ -736,6 +736,58 @@ describe("graph-resolution", () => {
       expect(root?.members).toEqual(["packages/alpha"]);
     });
 
+    // uv expands `members` by globbing the filesystem, where a lone `*` selects
+    // one path segment, but matches `exclude` against the member's whole path,
+    // where it does not stop at a separator. Translating both with the same
+    // narrow `*` under-excluded, and under-excluding is the direction that
+    // invents an edge. All three checked against uv 0.10.0 and 0.11.8, which
+    // agree.
+
+    it("excludes through a `*` that spans a path separator", () => {
+      // `*legacy` does not match `packages/legacy` a segment at a time, so a
+      // segment-wise `*` kept legacy a member and drew a cross-package edge to
+      // the one package the manifest named to keep out.
+      project = createTempProject({
+        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/*"]\nexclude = ["*legacy"]\n',
+        "packages/alpha/pyproject.toml": "",
+        "packages/legacy/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual(["packages/alpha"]);
+    });
+
+    it("empties the workspace when a bare `*` is excluded", () => {
+      // Not an exotic spelling, and the whole point of the asymmetry: uv reads
+      // this as excluding every member, leaving the root alone.
+      project = createTempProject({
+        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/*"]\nexclude = ["*"]\n',
+        "packages/alpha/pyproject.toml": "",
+        "packages/legacy/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual([]);
+    });
+
+    it("keeps a member whose path a `*` in the include list cannot span", () => {
+      // The include side must NOT gain the spanning `*`: uv globs the
+      // filesystem for members, so `packages/*` stops at a segment and
+      // `packages/alpha/inner` is not a member. Widening it here would
+      // register a root over a package the workspace never declared.
+      project = createTempProject({
+        "pyproject.toml": '[tool.uv.workspace]\nmembers = ["packages/*"]\n',
+        "packages/alpha/pyproject.toml": "",
+        "packages/alpha/inner/pyproject.toml": "",
+      });
+
+      const root = buildPythonManifests(project.root).find((m) => m.dir === ".");
+
+      expect(root?.members).toEqual(["packages/alpha"]);
+    });
+
     it("keeps a package a member when the only exclusion names a `#` path", () => {
       // Looks like the case above and is not: uv reads `packages/#legacy` as a
       // literal path that matches nothing, so `legacy` stays a member and the
