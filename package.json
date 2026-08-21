@@ -81,6 +81,8 @@
     "@ast-grep/lang-swift": "^0.0.7",
     "@ast-grep/napi": "^0.40.5",
     "@google/generative-ai": "^0.24.1",
+    "@lumis-sh/wasm-eex": "^0.26.1",
+    "@lumis-sh/wasm-heex": "^0.26.2",
     "@modelcontextprotocol/sdk": "^1.26.0",
     "@parcel/watcher": "^2.5.6",
     "@qdrant/js-client-rest": "^1.17.0",
@@ -91,6 +93,7 @@
     "openai": "^6.22.0",
     "proper-lockfile": "^4.1.2",
     "smol-toml": "^1.8.0",
+    "web-tree-sitter": "^0.26.12",
     "zod": "^3.24.2"
   },
   "devDependencies": {

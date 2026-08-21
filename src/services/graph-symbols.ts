@@ -10,6 +10,7 @@
 import { Lang, parse } from "@ast-grep/napi";
 import { getLanguageFromExtension } from "../constants.js";
 import type { SymbolEdge, SymbolKind, SymbolNode } from "../types.js";
+import { analyzeElixirTemplate, isElixirTemplateExtension } from "./elixir-templates.js";
 import { logger } from "./logger.js";
 
 /** Result of extracting symbols + raw call sites from a file. */
@@ -136,6 +137,9 @@ export function extractSymbolsAndCalls(
   };
 
   try {
+    if (isElixirTemplateExtension(ext)) {
+      return extractFromElixirTemplate(source, ext, relativePath, moduleSymbol);
+    }
     if (
       langKey === Lang.JavaScript ||
       langKey === Lang.TypeScript ||
@@ -220,20 +224,31 @@ function extractFromElixir(
     }
   };
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-  const callName = (node: any): string | null => {
-    const children = childrenOf(node);
-    const identifier = children.find((child) => child.kind() === "identifier");
-    if (identifier) return identifier.text();
-    const dot = children.find((child) => child.kind() === "dot");
-    const names = dot ? safeFindAll(dot, "identifier") : [];
-    return names.at(-1)?.text() ?? null;
+  const targetOf = (node: any): any | null => {
+    try {
+      return node.field("target") ?? null;
+    } catch {
+      return null;
+    }
   };
   // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
-  const isDefinitionHead = (node: any): boolean => {
-    const args = node.parent();
-    const definition = args?.kind() === "arguments" ? args.parent() : null;
-    const name = definition ? callName(definition) : null;
-    return name === "def" || name === "defp";
+  const targetName = (node: any): string | null => {
+    const target = targetOf(node);
+    return target?.kind() === "identifier" ? target.text() : null;
+  };
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const calleeName = (node: any): string | null => {
+    const target = targetOf(node);
+    if (target?.kind() === "identifier") return target.text();
+    if (target?.kind() !== "dot") return null;
+    const children = childrenOf(target);
+    if (children[0]?.kind() !== "alias") return null;
+    return [...children].reverse().find((child) => child.kind() === "identifier")?.text() ?? null;
+  };
+  // biome-ignore lint/suspicious/noExplicitAny: ast-grep node type leaks through
+  const nodeKey = (node: any): string => {
+    const range = node.range();
+    return `${range.start.line}:${range.start.column}:${range.end.line}:${range.end.column}`;
   };
   const addSymbol = (
     name: string,
@@ -253,19 +268,23 @@ function extractFromElixir(
   const calls = safeFindAll(root, "call");
   const modules: Array<{ name: string; startLine: number; endLine: number }> = [];
   for (const node of calls) {
-    if (callName(node) !== "defmodule") continue;
+    if (targetName(node) !== "defmodule") continue;
     const args = childrenOf(node).find((child) => child.kind() === "arguments");
-    const name = args ? safeFindAll(args, "alias")[0]?.text() : null;
-    if (!name) continue;
+    const rawName = args ? safeFindAll(args, "alias")[0]?.text() : null;
+    if (!rawName) continue;
     const range = node.range();
     const startLine = range.start.line + 1;
     const endLine = range.end.line + 1;
+    const owner = modules
+      .filter((module) => startLine >= module.startLine && endLine <= module.endLine)
+      .sort((a, b) => b.startLine - a.startLine)[0];
+    const name = owner && !rawName.includes(".") ? `${owner.name}.${rawName}` : rawName;
     addSymbol(name, name, "module", startLine, endLine);
     modules.push({ name, startLine, endLine });
   }
 
   for (const node of calls) {
-    const visibility = callName(node);
+    const visibility = targetName(node);
     if (visibility !== "def" && visibility !== "defp") continue;
     const name = node.text().match(/^(?:def|defp)\s+([a-z_]\w*[!?]?)/)?.[1];
     if (!name) continue;
@@ -278,20 +297,63 @@ function extractFromElixir(
     addSymbol(name, owner ? `${owner.name}.${name}` : name, "function", startLine, endLine);
   }
 
-  const directives = new Set(["def", "defp", "defmodule", "alias", "import", "require", "use"]);
+  const definitionMacros = new Set([
+    "def", "defp", "defmodule", "defstruct", "defguard", "defguardp", "defmacro", "defmacrop",
+    "defdelegate", "defprotocol", "defimpl",
+  ]);
+  const definitionsWithHeads = new Set([
+    "def", "defp", "defguard", "defguardp", "defmacro", "defmacrop", "defdelegate",
+  ]);
+  const definitionHeads = new Set<string>();
+  for (const node of calls) {
+    if (!definitionsWithHeads.has(targetName(node) ?? "")) continue;
+    const args = childrenOf(node).find((child) => child.kind() === "arguments");
+    const head = args ? safeFindAll(args, "call")[0] : null;
+    if (head) definitionHeads.add(nodeKey(head));
+  }
+
+  const ignoredCalls = new Set([
+    ...definitionMacros,
+    "alias", "import", "require", "use",
+    "if", "unless", "for", "with", "case", "cond", "receive", "try", "quote", "unquote",
+  ]);
   const rawCalls: ExtractedSymbols["rawCalls"] = [];
   for (const node of calls) {
-    const calleeName = callName(node);
-    if (!calleeName || directives.has(calleeName) || isDefinitionHead(node)) continue;
+    const name = calleeName(node);
+    if (
+      !name ||
+      ignoredCalls.has(name) ||
+      definitionHeads.has(nodeKey(node)) ||
+      node.parent()?.kind() === "unary_operator"
+    ) continue;
     const line = node.range().start.line + 1;
     rawCalls.push({
       callerId: findCallerId(scopes, line, moduleSym.id),
-      calleeName,
+      calleeName: name,
       callSite: { file, line },
     });
   }
 
   return { symbols, rawCalls };
+}
+
+function extractFromElixirTemplate(
+  source: string,
+  ext: string,
+  file: string,
+  moduleSym: SymbolNode,
+): ExtractedSymbols {
+  const analysis = analyzeElixirTemplate(source, ext);
+  if (!analysis) {
+    logger.debug("Invalid HEEx/EEx template AST; skipping symbols and calls", { file });
+    return { symbols: [moduleSym], rawCalls: [] };
+  }
+
+  const rawCalls: ExtractedSymbols["rawCalls"] = analysis.elixirSource
+    ? extractFromElixir(analysis.elixirSource, file, moduleSym.language, moduleSym).rawCalls
+      .map((call) => ({ ...call, callerId: moduleSym.id }))
+    : [];
+  return { symbols: [moduleSym], rawCalls };
 }
 
 // ── Lua (namespace tables: function T.f(), local function f(), T.f = function()) ──

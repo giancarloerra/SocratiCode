@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { Lang, parse } from "@ast-grep/napi";
+import { analyzeElixirTemplate, isElixirTemplateExtension } from "./elixir-templates.js";
 import { logger } from "./logger.js";
 
 // ── Import extraction per language ───────────────────────────────────────
@@ -89,9 +90,23 @@ function extractJsTsImportsFromNode(sgNode: ReturnType<ReturnType<typeof parse>[
  * Extract import statements from source code using ast-grep.
  * Returns raw module specifiers for each language's import syntax.
  */
-export function extractImports(source: string, lang: Lang | string, _ext: string): ImportInfo[] {
+export function extractImports(source: string, lang: Lang | string, ext: string): ImportInfo[] {
   const imports: ImportInfo[] = [];
   const langKey = String(lang);
+
+  if (isElixirTemplateExtension(ext)) {
+    const analysis = analyzeElixirTemplate(source, ext);
+    if (!analysis) return imports;
+    for (const moduleSpecifier of analysis.moduleReferences) {
+      imports.push({ moduleSpecifier, isDynamic: false });
+    }
+    if (analysis.elixirSource) {
+      for (const item of extractImports(analysis.elixirSource, "elixir", ".ex")) {
+        if (!imports.some((existing) => existing.moduleSpecifier === item.moduleSpecifier)) imports.push(item);
+      }
+    }
+    return imports;
+  }
 
   // ── Regex-only extraction for languages without AST grammars ──────────
   if (langKey === "dart") {
@@ -350,22 +365,28 @@ export function extractImports(source: string, lang: Lang | string, _ext: string
       }
       case "elixir": {
         // alias/import/require/use MyApp.Module [,...]
+        const addImport = (moduleSpecifier: string): void => {
+          if (!imports.some((item) => item.moduleSpecifier === moduleSpecifier)) {
+            imports.push({ moduleSpecifier, isDynamic: false });
+          }
+        };
         for (const node of sgNode.findAll({ rule: { kind: "call" } })) {
-          const children = node.children();
-          const directive = children.find((child) => child.kind() === "identifier")?.text();
+          const target = node.field("target");
+          const directive = target?.kind() === "identifier" ? target.text() : null;
           if (!directive || !["alias", "import", "require", "use"].includes(directive)) continue;
-          const args = children.find((child) => child.kind() === "arguments")?.text() ?? "";
+          const args = (node.children().find((child) => child.kind() === "arguments")?.text() ?? "")
+            .replace(/^\(\s*/, "");
           const match = args.match(/^([A-Z]\w*(?:\.[A-Z]\w*)*)(?:\.\{([^}]+)\})?/);
           if (!match) continue;
           if (match[2]) {
             for (const member of match[2].split(",")) {
               const name = member.trim();
-              if (/^[A-Z]\w*$/.test(name)) {
-                imports.push({ moduleSpecifier: `${match[1]}.${name}`, isDynamic: false });
+              if (/^[A-Z]\w*(?:\.[A-Z]\w*)*$/.test(name)) {
+                addImport(`${match[1]}.${name}`);
               }
             }
           } else {
-            imports.push({ moduleSpecifier: match[1], isDynamic: false });
+            addImport(match[1]);
           }
         }
         break;

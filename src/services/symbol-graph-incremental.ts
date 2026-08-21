@@ -33,6 +33,7 @@ import type {
   SymbolRef,
 } from "../types.js";
 import { getAstGrepLang } from "./code-graph.js";
+import { ensureElixirTemplateParsers, isElixirTemplateExtension } from "./elixir-templates.js";
 import { resolveExtensionlessExtensionStrict } from "./extensionless.js";
 import { resolveCallSites } from "./graph-symbol-resolution.js";
 import {
@@ -99,6 +100,9 @@ export async function updateChangedFilesSymbolGraph(
       fullRebuildRequired: true,
     };
   }
+  if (changedRelPaths.some((file) => isElixirTemplateExtension(path.extname(file)))) {
+    await ensureElixirTemplateParsers();
+  }
 
   // Track shards that need re-saving so we batch IO at the end.
   const dirtyNameShards = new Map<string, Record<string, SymbolRef[]>>();
@@ -140,6 +144,7 @@ export async function updateChangedFilesSymbolGraph(
   for (const relPath of changedRelPaths) {
     let ext = path.extname(relPath);
     let lang = getAstGrepLang(ext);
+    const isElixirTemplate = isElixirTemplateExtension(ext);
     const wasExtensionless = ext === "";
     // Detected extensionless files must patch incrementally too, or their
     // symbols would appear only after a full rebuildGraph() and go stale
@@ -173,7 +178,7 @@ export async function updateChangedFilesSymbolGraph(
         lang = getAstGrepLang(detected);
       }
     }
-    if (!lang) {
+    if (!lang && !isElixirTemplate) {
       // A *changed* extensionless file that lost its grammar (e.g. its shebang
       // changed to an unmapped interpreter, so it now detects as .txt) is still
       // indexable, so it arrives here as changed — never via removedRelPaths.
@@ -211,7 +216,7 @@ export async function updateChangedFilesSymbolGraph(
     }
     const language = getLanguageFromExtension(ext) ?? "plaintext";
     // biome-ignore lint/suspicious/noExplicitAny: ast-grep Lang type unify
-    const extracted = extractSymbolsAndCalls(source, lang as any, ext, relPath);
+    const extracted = extractSymbolsAndCalls(source, (lang ?? "elixir-template") as any, ext, relPath);
 
     // Resolution: build minimal symbolsByFile/outgoingCallsByFile maps so we
     // can reuse the existing 3-tier resolver. Other files' symbols are not

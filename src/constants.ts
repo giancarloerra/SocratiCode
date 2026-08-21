@@ -180,7 +180,6 @@ export const ENTRY_POINT_NAMES: Record<string, Set<string>> = {
   ruby: new Set(["main"]),
   php: new Set(["main"]),
   dart: new Set(["main"]),
-  elixir: new Set(["main"]),
 };
 
 // ── Path normalization ──────────────────────────────────────────────────
@@ -196,6 +195,9 @@ export function toForwardSlash(p: string): string {
 }
 
 // ── File type configuration ─────────────────────────────────────────────
+
+/** Mixed templates parsed structurally; only captured expressions are parsed as Elixir. */
+export const ELIXIR_TEMPLATE_EXTENSIONS = new Set([".heex", ".eex", ".leex"]);
 
 export const SUPPORTED_EXTENSIONS = new Set([
   // JavaScript/TypeScript
@@ -231,7 +233,7 @@ export const SUPPORTED_EXTENSIONS = new Set([
   // Dart
   ".dart",
   // Elixir
-  ".ex", ".exs",
+  ".ex", ".exs", ...ELIXIR_TEMPLATE_EXTENSIONS,
   // Lua
   ".lua",
   // R
@@ -307,6 +309,7 @@ const EXTENSION_TO_LANGUAGE: Record<string, string> = {
   ".sql": "sql",
   ".dart": "dart",
   ".ex": "elixir", ".exs": "elixir",
+  ".heex": "elixir", ".eex": "elixir", ".leex": "elixir",
   ".lua": "lua",
   ".r": "r", ".R": "r",
   ".dockerfile": "dockerfile",

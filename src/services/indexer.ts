@@ -23,6 +23,7 @@ import {
 import type { FileChunk } from "../types.js";
 import { ensureDynamicLanguages, getAstGrepLang, rebuildGraph, removeGraph } from "./code-graph.js";
 import { ensureArtifactsIndexed, loadConfig, removeAllArtifacts } from "./context-artifacts.js";
+import { analyzeElixirTemplate, ensureElixirTemplateParsers, isElixirTemplateExtension } from "./elixir-templates.js";
 import { generateEmbeddings, prepareDocumentText } from "./embeddings.js";
 import { detectExtensionFromSource, resolveExtensionlessExtension } from "./extensionless.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
@@ -493,9 +494,11 @@ export function chunkFileContent(
     }]);
   }
 
-  // Try AST-aware chunking for supported languages
+  // Try AST-aware chunking for supported languages and mixed Elixir templates.
   const astLang = getAstGrepLang(ext);
-  const regions = astLang ? findAstBoundaries(content, astLang) : [];
+  const regions = isElixirTemplateExtension(ext)
+    ? (analyzeElixirTemplate(content, ext)?.regions ?? [])
+    : astLang ? findAstBoundaries(content, astLang) : [];
 
   if (regions.length > 0) {
     return applyCharCap(chunkByAstRegions(filePath, relativePath, lines, language, regions));
@@ -782,6 +785,9 @@ export async function indexProject(
   // ── Phase 1: Scan and chunk files ──
   progress.phase = "scanning files";
   const files = await getIndexableFiles(resolvedPath, extraExtensions);
+  if (files.some((file) => isElixirTemplateExtension(path.extname(file)))) {
+    await ensureElixirTemplateParsers();
+  }
   progress.filesTotal = files.length;
   onProgress?.(`Found ${files.length} indexable files`);
 
@@ -1093,6 +1099,9 @@ export async function updateProjectIndex(
   // ── Phase 1: Scan files and identify changes ──
   progress.phase = "scanning for changes";
   const currentFiles = await getIndexableFiles(resolvedPath, extraExtensions);
+  if (currentFiles.some((file) => isElixirTemplateExtension(path.extname(file)))) {
+    await ensureElixirTemplateParsers();
+  }
   progress.filesTotal = currentFiles.length;
   onProgress?.(`Found ${currentFiles.length} indexable files, scanning for changes...`);
   const currentFileSet = new Set(currentFiles);
