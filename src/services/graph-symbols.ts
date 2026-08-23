@@ -308,8 +308,9 @@ function extractFromElixir(
   for (const node of calls) {
     if (!definitionsWithHeads.has(targetName(node) ?? "")) continue;
     const args = childrenOf(node).find((child) => child.kind() === "arguments");
-    const head = args ? safeFindAll(args, "call")[0] : null;
-    if (head) definitionHeads.add(nodeKey(head));
+    const firstArgument = args ? childrenOf(args)[0] : null;
+    const head = firstArgument?.kind() === "binary_operator" ? firstArgument.field("left") : firstArgument;
+    if (head?.kind() === "call") definitionHeads.add(nodeKey(head));
   }
 
   const ignoredCalls = new Set([

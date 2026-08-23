@@ -62,15 +62,18 @@ describe("Elixir support", () => {
     App.Target.save(value)
   end
 
+  def ready, do: bootstrap()
   defp helper(value), do: value
+  defp bootstrap, do: :ok
 end
 `;
     const result = extractSymbolsAndCalls(source, "elixir", ".ex", "lib/worker.ex");
     expect(result.symbols.map((symbol) => symbol.qualifiedName)).toEqual(expect.arrayContaining([
       "App.Worker", "App.Worker.run", "App.Worker.helper",
     ]));
-    expect(result.rawCalls.map((call) => call.calleeName).sort()).toEqual(["helper", "save"]);
+    expect(result.rawCalls.map((call) => call.calleeName).sort()).toEqual(["bootstrap", "helper", "save"]);
     expect(result.rawCalls.find((call) => call.calleeName === "helper")?.callerId).toContain("App.Worker.run");
+    expect(result.rawCalls.find((call) => call.calleeName === "bootstrap")?.callerId).toContain("App.Worker.ready");
 
     const module = (name: string) => `defmodule App.${name} do\n${Array.from({ length: 60 }, (_, i) => `  # ${i}`).join("\n")}\nend`;
     const content = `${module("One")}\n\n${module("Two")}\n`;
