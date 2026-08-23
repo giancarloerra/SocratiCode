@@ -11,6 +11,7 @@ RUNTIME DEPENDENCIES
 @ast-grep/lang-c                  MIT License
 @ast-grep/lang-cpp                MIT License
 @ast-grep/lang-csharp             MIT License
+@ast-grep/lang-elixir             ISC License
 @ast-grep/lang-go                 MIT License
 @ast-grep/lang-java               MIT License
 @ast-grep/lang-kotlin             MIT License
