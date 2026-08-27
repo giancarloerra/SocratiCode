@@ -60,6 +60,8 @@ describe("Elixir templates", () => {
 
     expect(extractSymbolsAndCalls("<%= render(", "elixir-template", ".eex", "bad.eex").rawCalls)
       .toEqual([]);
+    expect(extractSymbolsAndCalls("<div>{load(@id}</div>", "elixir-template", ".heex", "missing.heex").rawCalls)
+      .toEqual([]);
     expect(extractSymbolsAndCalls("<p>😀</p>{load(@id)}", "elixir-template", ".heex", "unicode.heex")
       .rawCalls.map((call) => call.calleeName)).toEqual(["load"]);
   });

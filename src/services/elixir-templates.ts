@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 
 import { fileURLToPath } from "node:url";
-import { type Lang, parse } from "@ast-grep/napi";
+import { type Lang, parse, type SgNode } from "@ast-grep/napi";
 import type { Node as SyntaxNode, Parser as WebParser } from "web-tree-sitter";
 import { ELIXIR_TEMPLATE_EXTENSIONS } from "../constants.js";
 import { logger } from "./logger.js";
@@ -52,6 +52,11 @@ function parserFor(ext: string): WebParser | null {
   return parsers.get(ext.toLowerCase() === ".heex" ? "heex" : "eex") ?? null;
 }
 
+/** ast-grep exposes Tree-sitter MISSING tokens as zero-width, empty leaf nodes. */
+function hasMissingNode(node: SgNode): boolean {
+  return node.isLeaf() ? node.text() === "" : node.children().some(hasMissingNode);
+}
+
 function maskEmbeddedElixir(source: string, nodes: SyntaxNode[]): string | null {
   if (nodes.length === 0) return "";
   const masked: string[] = Array.from({ length: source.length }, (_, i) =>
@@ -80,7 +85,7 @@ function maskEmbeddedElixir(source: string, nodes: SyntaxNode[]): string | null 
   const elixirSource = masked.join("");
   try {
     const root = parse("elixir" as unknown as Lang, elixirSource).root();
-    if (root.findAll({ rule: { kind: "ERROR" } }).length > 0) return null;
+    if (root.findAll({ rule: { kind: "ERROR" } }).length > 0 || hasMissingNode(root)) return null;
   } catch {
     return null;
   }
