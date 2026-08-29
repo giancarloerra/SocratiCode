@@ -705,7 +705,7 @@ Factory that creates and caches the active `EmbeddingProvider` instance. Uses dy
 | `getEmbeddingProvider` | `(onProgress?) → Promise<EmbeddingProvider>` — Get (or create) the active provider singleton. Re-creates if config changed. |
 | `resetEmbeddingProvider` | `() → void` — Clear cached provider (for testing). |
 
-Provider selected via `EMBEDDING_PROVIDER` env var (`ollama` / `openai` / `google`).
+Provider selected via `EMBEDDING_PROVIDER` env var (`ollama` / `openai` / `google` / `lmstudio` / `litellm` / `orcarouter`).
 
 ### provider-ollama.ts
 
@@ -743,6 +743,37 @@ Google Generative AI embedding provider. Requires `GOOGLE_API_KEY`.
 | `resetGoogleClient` | `() → void` — Clear cached client (for testing). |
 
 `ensureReady()` validates the API key and makes a minimal test embedding call. Pre-truncates to 2048 tokens (~3 chars/token). Default model is `gemini-embedding-001` (3072 dims).
+
+### provider-litellm.ts
+
+LiteLLM embedding provider. Points at a LiteLLM Proxy Server (OpenAI-compatible gateway in front
+of 100+ providers). Requires `LITELLM_API_KEY` plus explicit `EMBEDDING_MODEL` (a proxy alias) and
+`EMBEDDING_DIMENSIONS` (the alias's underlying dim). `LITELLM_URL` defaults to
+`http://localhost:4000/v1`.
+
+| Export | Description |
+|--------|-------------|
+| `LiteLLMEmbeddingProvider` | Provider class. Iterates `/v1/models` in `ensureReady()` to fail early when the alias is not registered on the proxy. |
+| `resetLiteLLMClient` | `() → void` — Clear cached client (for testing or URL/key hot-swap). |
+
+`embed()` forwards `encoding_format: "float"` (required — see the class comment for the base64
+decode bug) and optionally `dimensions` when `LITELLM_SEND_DIMENSIONS=true`.
+
+### provider-orcarouter.ts
+
+OrcaRouter embedding provider. Points at the OrcaRouter AI gateway (OpenAI-compatible endpoint,
+provider/model namespace like OpenRouter). Requires `ORCAROUTER_API_KEY` plus explicit
+`EMBEDDING_MODEL` (a `provider/model` id from the gateway's `/v1/models`, e.g.
+`google/gemini-embedding-001`) and `EMBEDDING_DIMENSIONS` (the chosen model's dim).
+`ORCAROUTER_URL` defaults to `https://api.orcarouter.ai/v1`.
+
+| Export | Description |
+|--------|-------------|
+| `OrcaRouterEmbeddingProvider` | Provider class. Iterates `/v1/models` in `ensureReady()` to fail early when the model id is not registered on the gateway. |
+| `resetOrcaRouterClient` | `() → void` — Clear cached client (for testing or URL/key hot-swap). |
+
+`embed()` forwards `encoding_format: "float"` (required — same base64 decode bug as LiteLLM) and
+optionally `dimensions` when `ORCAROUTER_SEND_DIMENSIONS=true`.
 
 ### qdrant.ts
 
@@ -1454,7 +1485,7 @@ Edit `CHUNK_SIZE` and `CHUNK_OVERLAP` in `src/constants.ts`. Smaller chunks give
 
 ### Switching embedding model or provider
 
-1. Set `EMBEDDING_PROVIDER` in your MCP config env block (`ollama`, `openai`, or `google`).
+1. Set `EMBEDDING_PROVIDER` in your MCP config env block (`ollama`, `openai`, `google`, `lmstudio`, `litellm`, or `orcarouter`).
 2. Optionally override `EMBEDDING_MODEL` and `EMBEDDING_DIMENSIONS` for the chosen provider (auto-detected defaults exist for all built-in models).
 3. Re-index all projects (`codebase_remove` then `codebase_index`) since existing vectors have different dimensions.
 

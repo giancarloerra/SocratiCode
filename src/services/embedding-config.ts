@@ -13,6 +13,10 @@
  *                100+ underlying providers). Requires LITELLM_API_KEY,
  *                EMBEDDING_MODEL (must match an alias in the proxy's config.yaml),
  *                and EMBEDDING_DIMENSIONS (the alias's underlying dim).
+ *   - "orcarouter": Use OrcaRouter (OpenAI-compatible AI gateway in front of many
+ *                providers, model ids like google/gemini-embedding-001). Requires
+ *                ORCAROUTER_API_KEY, EMBEDDING_MODEL (a provider/model id from the
+ *                gateway's /v1/models), and EMBEDDING_DIMENSIONS (the chosen model's dim).
  *
  * Ollama-specific:
  *   OLLAMA_MODE:
@@ -53,6 +57,17 @@
  *                              underlying models (text-embedding-3-*, voyage-3). Default off
  *                              because non-Matryoshka backends reject it.
  *
+ * OrcaRouter-specific:
+ *   ORCAROUTER_URL:            OpenAI-compatible base URL of the OrcaRouter gateway.
+ *                              Default: https://api.orcarouter.ai/v1 (the /v1 suffix is required;
+ *                              the gateway exposes /v1/embeddings under that prefix).
+ *   ORCAROUTER_API_KEY:        Required. API key issued by OrcaRouter. Unlike LM Studio, the
+ *                              gateway always authenticates.
+ *   ORCAROUTER_SEND_DIMENSIONS: Opt-in ("true" / "1" / "yes"). Forwards the OpenAI-style
+ *                              `dimensions` parameter to the gateway for Matryoshka-aware
+ *                              underlying models (openai/text-embedding-3-*). Default off
+ *                              because non-Matryoshka backends reject it.
+ *
  * Shared:
  *   EMBEDDING_MODEL:       Model name (default depends on provider; required for lmstudio).
  *   EMBEDDING_DIMENSIONS:  Vector dimensions — must match the model (default depends on
@@ -64,7 +79,7 @@ import { logger } from "./logger.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
-export type EmbeddingProvider = "ollama" | "openai" | "google" | "lmstudio" | "litellm";
+export type EmbeddingProvider = "ollama" | "openai" | "google" | "lmstudio" | "litellm" | "orcarouter";
 export type OllamaMode = "docker" | "external" | "auto";
 
 export interface EmbeddingConfig {
@@ -85,6 +100,8 @@ export interface EmbeddingConfig {
   lmstudioUrl: string;
   /** LiteLLM proxy OpenAI-compatible base URL (only relevant when embeddingProvider is "litellm"). */
   litellmUrl: string;
+  /** OrcaRouter gateway OpenAI-compatible base URL (only relevant when embeddingProvider is "orcarouter"). */
+  orcarouterUrl: string;
   embeddingModel: string;
   embeddingDimensions: number;
   /** Max context window in tokens. Used for client-side pre-truncation. */
@@ -95,10 +112,11 @@ export interface EmbeddingConfig {
 // ── Provider defaults ─────────────────────────────────────────────────────
 
 /**
- * lmstudio and litellm have empty defaults: there's no canonical model — users
- * pick one (the loaded LM Studio model, or a proxy alias from LiteLLM's
- * config.yaml). We fail-fast in loadEmbeddingConfig() when those providers are
- * selected without explicit EMBEDDING_MODEL / EMBEDDING_DIMENSIONS.
+ * lmstudio, litellm, and orcarouter have empty defaults: there's no canonical
+ * model — users pick one (the loaded LM Studio model, a proxy alias from
+ * LiteLLM's config.yaml, or a provider/model id from OrcaRouter's /v1/models).
+ * We fail-fast in loadEmbeddingConfig() when those providers are selected
+ * without explicit EMBEDDING_MODEL / EMBEDDING_DIMENSIONS.
  */
 const PROVIDER_DEFAULTS: Record<EmbeddingProvider, { model: string; dimensions: number }> = {
   ollama:   { model: "nomic-embed-text",        dimensions: 768  },
@@ -106,6 +124,7 @@ const PROVIDER_DEFAULTS: Record<EmbeddingProvider, { model: string; dimensions: 
   google:   { model: "gemini-embedding-001",    dimensions: 3072 },
   lmstudio: { model: "",                        dimensions: 0    },
   litellm:  { model: "",                        dimensions: 0    },
+  orcarouter: { model: "",                      dimensions: 0    },
 };
 
 // ── Ollama mode defaults ──────────────────────────────────────────────────
@@ -135,6 +154,13 @@ const MODEL_CONTEXT_LENGTHS: Record<string, number> = {
   "text-embedding-ada-002": 8191,
   // Google models
   "gemini-embedding-001": 2048,
+  // OrcaRouter model ids (provider/model namespace). These names match the
+  // gateway's /v1/models, so EMBEDDING_MODEL values like
+  // google/gemini-embedding-001 or openai/text-embedding-3-small auto-detect.
+  "google/gemini-embedding-001": 2048,
+  "openai/text-embedding-3-small": 8191,
+  "openai/text-embedding-3-large": 8191,
+  "openai/text-embedding-ada-002": 8191,
 };
 
 /** Guess context length from model name. Returns 0 if unknown. */
@@ -161,10 +187,11 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
     rawProvider !== "openai" &&
     rawProvider !== "google" &&
     rawProvider !== "lmstudio" &&
-    rawProvider !== "litellm"
+    rawProvider !== "litellm" &&
+    rawProvider !== "orcarouter"
   ) {
     throw new Error(
-      `Invalid EMBEDDING_PROVIDER: "${rawProvider}". Must be "ollama", "openai", "google", "lmstudio", or "litellm".`,
+      `Invalid EMBEDDING_PROVIDER: "${rawProvider}". Must be "ollama", "openai", "google", "lmstudio", "litellm", or "orcarouter".`,
     );
   }
   const embeddingProvider: EmbeddingProvider = rawProvider;
@@ -222,6 +249,36 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
     }
   }
 
+  // OrcaRouter model ids are provider/model names defined by the gateway — there
+  // is no canonical default model name and the dimension depends on which model
+  // id the operator chooses. Authentication is mandatory (the gateway enforces
+  // it even for read-only /v1/models). Fail fast on each missing piece so the
+  // operator gets a single, specific error rather than a generic 401 / 404 from
+  // the gateway at first embed().
+  if (embeddingProvider === "orcarouter") {
+    if (!process.env.ORCAROUTER_API_KEY) {
+      throw new Error(
+        "ORCAROUTER_API_KEY is required when EMBEDDING_PROVIDER=orcarouter. " +
+        "Set it to an OrcaRouter API key from the OrcaRouter dashboard.",
+      );
+    }
+    if (!process.env.EMBEDDING_MODEL) {
+      throw new Error(
+        "EMBEDDING_MODEL is required when EMBEDDING_PROVIDER=orcarouter. " +
+        "Set it to a provider/model id from the gateway's /v1/models (e.g. " +
+        "EMBEDDING_MODEL=google/gemini-embedding-001 or EMBEDDING_MODEL=orcarouter/fusion).",
+      );
+    }
+    if (!process.env.EMBEDDING_DIMENSIONS) {
+      throw new Error(
+        "EMBEDDING_DIMENSIONS is required when EMBEDDING_PROVIDER=orcarouter. " +
+        "The chosen model id determines the output dimension — set this to the model's " +
+        "output dim (e.g. 3072 for google/gemini-embedding-001, 1536 for " +
+        "openai/text-embedding-3-small).",
+      );
+    }
+  }
+
   // ── Ollama mode (only relevant for ollama provider) ─────────────────
   const rawMode = process.env.OLLAMA_MODE || "auto";
   if (rawMode !== "docker" && rawMode !== "external" && rawMode !== "auto") {
@@ -260,6 +317,7 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
     ollamaUrl: process.env.OLLAMA_URL || modeDefaults.url,
     lmstudioUrl: process.env.LMSTUDIO_URL || "http://localhost:1234/v1",
     litellmUrl: process.env.LITELLM_URL || "http://localhost:4000/v1",
+    orcarouterUrl: process.env.ORCAROUTER_URL || "https://api.orcarouter.ai/v1",
     embeddingModel,
     embeddingDimensions,
     embeddingContextLength: contextLengthEnv
@@ -291,6 +349,10 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
       litellmUrl: _config.litellmUrl,
       sendDimensions: !!process.env.LITELLM_SEND_DIMENSIONS,
     } : {}),
+    ...(embeddingProvider === "orcarouter" ? {
+      orcarouterUrl: _config.orcarouterUrl,
+      sendDimensions: !!process.env.ORCAROUTER_SEND_DIMENSIONS,
+    } : {}),
     embeddingModel: _config.embeddingModel,
     embeddingDimensions: _config.embeddingDimensions,
     embeddingContextLength: _config.embeddingContextLength || "auto",
@@ -304,7 +366,9 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
             ? process.env.LMSTUDIO_API_KEY
             : embeddingProvider === "litellm"
               ? process.env.LITELLM_API_KEY
-              : undefined),
+              : embeddingProvider === "orcarouter"
+                ? process.env.ORCAROUTER_API_KEY
+                : undefined),
   });
 
   return _config;

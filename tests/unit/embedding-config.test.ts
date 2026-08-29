@@ -28,6 +28,9 @@ describe("embedding-config", () => {
     delete process.env.LITELLM_URL;
     delete process.env.LITELLM_API_KEY;
     delete process.env.LITELLM_SEND_DIMENSIONS;
+    delete process.env.ORCAROUTER_URL;
+    delete process.env.ORCAROUTER_API_KEY;
+    delete process.env.ORCAROUTER_SEND_DIMENSIONS;
   });
 
   afterEach(() => {
@@ -209,6 +212,7 @@ describe("embedding-config", () => {
         ollamaUrl: "http://remote-gpu:11434",
         lmstudioUrl: "http://localhost:1234/v1",
         litellmUrl: "http://localhost:4000/v1",
+        orcarouterUrl: "https://api.orcarouter.ai/v1",
         embeddingModel: "mxbai-embed-large",
         embeddingDimensions: 1024,
         embeddingContextLength: 512,
@@ -247,7 +251,7 @@ describe("embedding-config", () => {
     it("throws for invalid EMBEDDING_PROVIDER", () => {
       process.env.EMBEDDING_PROVIDER = "anthropic";
       expect(() => loadEmbeddingConfig()).toThrow(
-        'Invalid EMBEDDING_PROVIDER: "anthropic". Must be "ollama", "openai", "google", "lmstudio", or "litellm".',
+        'Invalid EMBEDDING_PROVIDER: "anthropic". Must be "ollama", "openai", "google", "lmstudio", "litellm", or "orcarouter".',
       );
     });
 
@@ -465,6 +469,132 @@ describe("embedding-config", () => {
 
       const config = loadEmbeddingConfig();
       expect(config.embeddingContextLength).toBe(8191);
+    });
+  });
+
+  describe("orcarouter provider", () => {
+    it("loads when API key, model, and dimensions are all set", () => {
+      process.env.EMBEDDING_PROVIDER = "orcarouter";
+      process.env.ORCAROUTER_API_KEY = "or_test_key";
+      process.env.EMBEDDING_MODEL = "google/gemini-embedding-001";
+      process.env.EMBEDDING_DIMENSIONS = "3072";
+
+      const config = loadEmbeddingConfig();
+      expect(config.embeddingProvider).toBe("orcarouter");
+      expect(config.embeddingModel).toBe("google/gemini-embedding-001");
+      expect(config.embeddingDimensions).toBe(3072);
+    });
+
+    it("defaults ORCAROUTER_URL to https://api.orcarouter.ai/v1", () => {
+      process.env.EMBEDDING_PROVIDER = "orcarouter";
+      process.env.ORCAROUTER_API_KEY = "or_test_key";
+      process.env.EMBEDDING_MODEL = "google/gemini-embedding-001";
+      process.env.EMBEDDING_DIMENSIONS = "3072";
+
+      const config = loadEmbeddingConfig();
+      expect(config.orcarouterUrl).toBe("https://api.orcarouter.ai/v1");
+    });
+
+    it("respects ORCAROUTER_URL override", () => {
+      process.env.EMBEDDING_PROVIDER = "orcarouter";
+      process.env.ORCAROUTER_API_KEY = "or_test_key";
+      process.env.EMBEDDING_MODEL = "openai/text-embedding-3-small";
+      process.env.EMBEDDING_DIMENSIONS = "1536";
+      process.env.ORCAROUTER_URL = "https://orcarouter.internal:443/v1";
+
+      const config = loadEmbeddingConfig();
+      expect(config.orcarouterUrl).toBe("https://orcarouter.internal:443/v1");
+    });
+
+    it("throws when ORCAROUTER_API_KEY is missing", () => {
+      process.env.EMBEDDING_PROVIDER = "orcarouter";
+      process.env.EMBEDDING_MODEL = "google/gemini-embedding-001";
+      process.env.EMBEDDING_DIMENSIONS = "3072";
+
+      expect(() => loadEmbeddingConfig()).toThrow(
+        /ORCAROUTER_API_KEY is required when EMBEDDING_PROVIDER=orcarouter/,
+      );
+    });
+
+    it("throws when EMBEDDING_MODEL is missing", () => {
+      process.env.EMBEDDING_PROVIDER = "orcarouter";
+      process.env.ORCAROUTER_API_KEY = "or_test_key";
+      process.env.EMBEDDING_DIMENSIONS = "3072";
+
+      expect(() => loadEmbeddingConfig()).toThrow(
+        /EMBEDDING_MODEL is required when EMBEDDING_PROVIDER=orcarouter/,
+      );
+    });
+
+    it("throws when EMBEDDING_DIMENSIONS is missing", () => {
+      process.env.EMBEDDING_PROVIDER = "orcarouter";
+      process.env.ORCAROUTER_API_KEY = "or_test_key";
+      process.env.EMBEDDING_MODEL = "google/gemini-embedding-001";
+
+      expect(() => loadEmbeddingConfig()).toThrow(
+        /EMBEDDING_DIMENSIONS is required when EMBEDDING_PROVIDER=orcarouter/,
+      );
+    });
+
+    it("validates the API_KEY check before model/dimension checks", () => {
+      // All three are missing — the API key error must surface first so the
+      // operator sees the most fundamental missing piece.
+      process.env.EMBEDDING_PROVIDER = "orcarouter";
+
+      expect(() => loadEmbeddingConfig()).toThrow(
+        /ORCAROUTER_API_KEY is required/,
+      );
+    });
+
+    it("includes example model ids in the model error message for discoverability", () => {
+      process.env.EMBEDDING_PROVIDER = "orcarouter";
+      process.env.ORCAROUTER_API_KEY = "or_test_key";
+      process.env.EMBEDDING_DIMENSIONS = "3072";
+
+      expect(() => loadEmbeddingConfig()).toThrow(
+        /google\/gemini-embedding-001/,
+      );
+    });
+
+    it("includes example dimensions in the error message for discoverability", () => {
+      process.env.EMBEDDING_PROVIDER = "orcarouter";
+      process.env.ORCAROUTER_API_KEY = "or_test_key";
+      process.env.EMBEDDING_MODEL = "google/gemini-embedding-001";
+
+      expect(() => loadEmbeddingConfig()).toThrow(
+        /3072 for google\/gemini-embedding-001/,
+      );
+    });
+
+    it("auto-detects context length when model id matches a well-known name", () => {
+      process.env.EMBEDDING_PROVIDER = "orcarouter";
+      process.env.ORCAROUTER_API_KEY = "or_test_key";
+      process.env.EMBEDDING_MODEL = "openai/text-embedding-3-small";
+      process.env.EMBEDDING_DIMENSIONS = "1536";
+
+      const config = loadEmbeddingConfig();
+      expect(config.embeddingContextLength).toBe(8191);
+    });
+
+    it("auto-detects context length for gemini-embedding model ids", () => {
+      process.env.EMBEDDING_PROVIDER = "orcarouter";
+      process.env.ORCAROUTER_API_KEY = "or_test_key";
+      process.env.EMBEDDING_MODEL = "google/gemini-embedding-001";
+      process.env.EMBEDDING_DIMENSIONS = "3072";
+
+      const config = loadEmbeddingConfig();
+      expect(config.embeddingContextLength).toBe(2048);
+    });
+
+    it("respects EMBEDDING_CONTEXT_LENGTH override for unknown model ids", () => {
+      process.env.EMBEDDING_PROVIDER = "orcarouter";
+      process.env.ORCAROUTER_API_KEY = "or_test_key";
+      process.env.EMBEDDING_MODEL = "orcarouter/fusion";
+      process.env.EMBEDDING_DIMENSIONS = "3072";
+      process.env.EMBEDDING_CONTEXT_LENGTH = "8192";
+
+      const config = loadEmbeddingConfig();
+      expect(config.embeddingContextLength).toBe(8192);
     });
   });
 });

@@ -13,6 +13,7 @@
  *   - google   — Google Generative AI Embedding API (gemini-embedding-001, etc.)
  *   - lmstudio — local LM Studio server via OpenAI-compatible API
  *   - litellm  — LiteLLM proxy (OpenAI-compatible gateway in front of 100+ providers)
+ *   - orcarouter — OrcaRouter gateway (OpenAI-compatible AI gateway in front of many providers)
  */
 
 import type { InfraProgressCallback } from "./docker.js";
@@ -72,9 +73,14 @@ export async function getEmbeddingProvider(onProgress?: InfraProgressCallback): 
       _provider = new LiteLLMEmbeddingProvider();
       break;
     }
+    case "orcarouter": {
+      const { OrcaRouterEmbeddingProvider } = await import("./provider-orcarouter.js");
+      _provider = new OrcaRouterEmbeddingProvider();
+      break;
+    }
     default:
       throw new Error(
-        `Unknown embedding provider: "${name}". Must be "ollama", "openai", "google", "lmstudio", or "litellm".`,
+        `Unknown embedding provider: "${name}". Must be "ollama", "openai", "google", "lmstudio", "litellm", or "orcarouter".`,
       );
   }
 

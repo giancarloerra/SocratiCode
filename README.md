@@ -233,7 +233,7 @@ On VS Code's 2.45M‑line codebase, SocratiCode answers architectural questions 
 - **Hybrid code search** — Built on Qdrant, a purpose-built vector database with HNSW indexing, concurrent read/write, and payload filtering. Each chunk stores both a dense vector and a BM25 sparse vector; the Query API runs both sub-queries in a single round-trip and fuses results with Reciprocal Rank Fusion (RRF). Semantic search handles conceptual queries like "authentication middleware" even when those exact words don't appear in the code. BM25 handles exact identifier and keyword lookups. You get the best of both in every query with no tuning required.
 - **Configurable Qdrant** — Use the built-in Docker Qdrant (default, zero config) or connect to your own instance (self-hosted, remote server, or Qdrant Cloud). Configure via `QDRANT_MODE`, `QDRANT_URL`, and `QDRANT_API_KEY` environment variables.
 - **Configurable Ollama** — Use the built-in Docker Ollama (default, zero config) or point to your own Ollama instance (native install -GPU access-, remote server, etc.). Configure via `OLLAMA_MODE`, `OLLAMA_URL`, `EMBEDDING_MODEL` and `EMBEDDING_DIMENSIONS` environment variables.
-- **Multi-provider embeddings** — Switch between Local Ollama (private, GPU access), Docker Ollama (zero-config), OpenAI (`text-embedding-3-small`, fastest), Google Gemini (`gemini-embedding-001`, free tier), LM Studio (local OpenAI-compatible server), or LiteLLM (proxy gateway in front of 100+ providers) with a single environment variable. No provider-specific configuration files.
+- **Multi-provider embeddings** — Switch between Local Ollama (private, GPU access), Docker Ollama (zero-config), OpenAI (`text-embedding-3-small`, fastest), Google Gemini (`gemini-embedding-001`, free tier), LM Studio (local OpenAI-compatible server), LiteLLM (proxy gateway in front of 100+ providers), or OrcaRouter (OpenAI-compatible AI gateway) with a single environment variable. No provider-specific configuration files.
 - **Private & secure** — Everything runs on your machine — your code never leaves your network. The default Docker setup includes Ollama (embeddings) and Qdrant (vector storage) with no external API calls. No API costs, no token limits. Suitable for air-gapped and on-premises environments. Optional cloud providers (OpenAI, Google Gemini, Qdrant Cloud) are available but never required.
 - **AST-aware chunking** — Files are split at function/class boundaries using AST parsing (ast-grep), not arbitrary line counts. This produces higher-quality search results. Falls back to line-based chunking for unsupported languages.
 - **Polyglot code dependency graph** — Static analysis of import/require/use/include statements using ast-grep for 18+ languages. No external tools like dependency-cruiser required. Detects circular dependencies and generates visual Mermaid diagrams.
@@ -754,6 +754,46 @@ across MCP configs), **fallback / load balancing** between embedding backends, o
 > OpenAI-compatible, lists your `EMBEDDING_MODEL` under `/v1/models`, and accepts it under its own
 > native model id (no LiteLLM `provider/` prefix).
 
+#### OrcaRouter (AI gateway)
+
+[OrcaRouter](https://www.orcarouter.ai) is an OpenAI-compatible AI gateway built for both models
+and agents. Like OpenRouter, it exposes a provider/model namespace across many models
+(`google/gemini-embedding-001`, `openai/text-embedding-3-small`, `orcarouter/fusion`, ...), but it
+also combines adaptive routing, automatic failover, zero-markup inference, observability,
+guardrails, and agent-tool governance behind the same endpoint. Use this provider when you want a
+**single API key** for multiple embedding backends, **automatic failover** between them, or
+**provider-agnostic indexes** that survive a backend swap — without hosting a proxy yourself.
+
+```json
+{
+  "mcpServers": {
+    "socraticode": {
+      "command": "node",
+      "args": ["/absolute/path/to/socraticode/dist/index.js"],
+      "env": {
+        "EMBEDDING_PROVIDER": "orcarouter",
+        "ORCAROUTER_API_KEY": "or-...",
+        "EMBEDDING_MODEL": "google/gemini-embedding-001",
+        "EMBEDDING_DIMENSIONS": "3072"
+      }
+    }
+  }
+}
+```
+
+> **`ORCAROUTER_API_KEY`, `EMBEDDING_MODEL`, and `EMBEDDING_DIMENSIONS` are all required.**
+> OrcaRouter always authenticates; the model id and dimension come from the gateway's `/v1/models`
+> namespace. SocratiCode fails fast on any missing piece.
+>
+> Optional: `ORCAROUTER_URL` (default `https://api.orcarouter.ai/v1`) — must include the `/v1`
+> suffix; `ORCAROUTER_SEND_DIMENSIONS=true` to forward the OpenAI `dimensions` parameter
+> through the gateway (only safe for Matryoshka-aware backends like `openai/text-embedding-3-*` —
+> other backends such as `google/gemini-embedding-001` reject the request).
+>
+> It also runs gateway-level, zero-trust security for AI agents on the same endpoint — screening
+> every prompt/response and governing every tool call on a default-deny basis, with no application
+> code changes.
+
 ### Git Worktrees (shared index across directories)
 
 If you use [git worktrees](https://git-scm.com/docs/git-worktree) — or any workflow where the same repository lives in multiple directories — each path would normally get its own Qdrant index. This means redundant embedding and storage for what is essentially the same codebase.
@@ -1169,10 +1209,10 @@ The rest of this section documents the variables themselves. Pass them using whi
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EMBEDDING_PROVIDER` | `ollama` | Embedding backend: `ollama` (local, default), `openai`, `google`, `lmstudio`, or `litellm` |
-| `EMBEDDING_MODEL` | *(per provider)* | Model name. Defaults: `nomic-embed-text` (ollama), `text-embedding-3-small` (openai), `gemini-embedding-001` (google). **Required** for `lmstudio` and `litellm` (no default). |
-| `EMBEDDING_DIMENSIONS` | *(per provider)* | Vector dimensions. Defaults: `768` (ollama), `1536` (openai), `3072` (google). **Required** for `lmstudio` and `litellm` (no default; varies per loaded model / proxy alias). |
-| `EMBEDDING_CONTEXT_LENGTH` | *(auto-detected)* | Model context window in tokens. Auto-detected for known model names (works for LiteLLM aliases that match the underlying model name). Set manually for custom LM Studio models or arbitrary LiteLLM aliases. |
+| `EMBEDDING_PROVIDER` | `ollama` | Embedding backend: `ollama` (local, default), `openai`, `google`, `lmstudio`, `litellm`, or `orcarouter` |
+| `EMBEDDING_MODEL` | *(per provider)* | Model name. Defaults: `nomic-embed-text` (ollama), `text-embedding-3-small` (openai), `gemini-embedding-001` (google). **Required** for `lmstudio`, `litellm`, and `orcarouter` (no default). |
+| `EMBEDDING_DIMENSIONS` | *(per provider)* | Vector dimensions. Defaults: `768` (ollama), `1536` (openai), `3072` (google). **Required** for `lmstudio`, `litellm`, and `orcarouter` (no default; varies per loaded model / proxy alias / gateway model id). |
+| `EMBEDDING_CONTEXT_LENGTH` | *(auto-detected)* | Model context window in tokens. Auto-detected for known model names (works for LiteLLM aliases and OrcaRouter model ids that match the underlying model name). Set manually for custom LM Studio models or arbitrary LiteLLM aliases / OrcaRouter model ids. |
 
 ### Ollama Configuration (when `EMBEDDING_PROVIDER=ollama`)
 
@@ -1205,6 +1245,14 @@ The rest of this section documents the variables themselves. Pass them using whi
 | `LITELLM_URL` | `http://localhost:4000/v1` | Full base URL of the LiteLLM proxy's OpenAI-compatible endpoint. Override for non-default ports or remote proxies (e.g. `https://litellm.internal:4001/v1`). Must include the `/v1` suffix — LiteLLM exposes `/v1/embeddings` under that prefix. |
 | `LITELLM_API_KEY` | *(none)* | **Required.** Master key (`general_settings.master_key` in the proxy's `config.yaml`) or a virtual key issued via LiteLLM's `/key/generate` endpoint. Unlike LM Studio, LiteLLM always authenticates — `/v1/models` itself is gated. |
 | `LITELLM_SEND_DIMENSIONS` | `false` | Opt-in (`true` / `1` / `yes`). Forwards the OpenAI-style `dimensions` parameter through the proxy. Safe only for Matryoshka-aware backends (`text-embedding-3-*`, `voyage-3`); other backends (BGE, `nomic-embed-text`, Cohere v3) reject the request. Leave unset unless you know your alias resolves to a Matryoshka model. |
+
+### OrcaRouter Configuration (when `EMBEDDING_PROVIDER=orcarouter`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ORCAROUTER_URL` | `https://api.orcarouter.ai/v1` | Full base URL of the OrcaRouter gateway's OpenAI-compatible endpoint. Override for custom gateways or egress-proxied setups. Must include the `/v1` suffix — OrcaRouter exposes `/v1/embeddings` under that prefix. |
+| `ORCAROUTER_API_KEY` | *(none)* | **Required.** OrcaRouter API key from the [OrcaRouter dashboard](https://www.orcarouter.ai). Unlike LM Studio, OrcaRouter always authenticates — `/v1/models` itself is gated. |
+| `ORCAROUTER_SEND_DIMENSIONS` | `false` | Opt-in (`true` / `1` / `yes`). Forwards the OpenAI-style `dimensions` parameter through the gateway. Safe only for Matryoshka-aware backends (`openai/text-embedding-3-*`); other backends (e.g. `google/gemini-embedding-001`) reject the request. Leave unset unless you know your model id resolves to a Matryoshka model. |
 
 ### Qdrant Configuration
 

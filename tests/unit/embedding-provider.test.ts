@@ -24,6 +24,9 @@ describe("embedding-provider", () => {
     delete process.env.LITELLM_URL;
     delete process.env.LITELLM_API_KEY;
     delete process.env.LITELLM_SEND_DIMENSIONS;
+    delete process.env.ORCAROUTER_URL;
+    delete process.env.ORCAROUTER_API_KEY;
+    delete process.env.ORCAROUTER_SEND_DIMENSIONS;
   });
 
   afterEach(() => {
@@ -65,6 +68,15 @@ describe("embedding-provider", () => {
       process.env.EMBEDDING_DIMENSIONS = "1536";
       const provider = await getEmbeddingProvider();
       expect(provider.name).toBe("litellm");
+    });
+
+    it("creates OrcaRouterEmbeddingProvider when configured", async () => {
+      process.env.EMBEDDING_PROVIDER = "orcarouter";
+      process.env.ORCAROUTER_API_KEY = "or_test_key";
+      process.env.EMBEDDING_MODEL = "google/gemini-embedding-001";
+      process.env.EMBEDDING_DIMENSIONS = "3072";
+      const provider = await getEmbeddingProvider();
+      expect(provider.name).toBe("orcarouter");
     });
 
     it("caches provider instance", async () => {
@@ -295,6 +307,92 @@ describe("LiteLLMEmbeddingProvider", () => {
     expect(
       health.statusLines.some(
         (l) => l.includes("LiteLLM") && l.includes("Not reachable"),
+      ),
+    ).toBe(true);
+  });
+});
+
+describe("OrcaRouterEmbeddingProvider", () => {
+  const originalEnv = { ...process.env };
+
+  beforeEach(() => {
+    resetEmbeddingConfig();
+    resetEmbeddingProvider();
+    delete process.env.EMBEDDING_PROVIDER;
+    delete process.env.EMBEDDING_MODEL;
+    delete process.env.EMBEDDING_DIMENSIONS;
+    delete process.env.EMBEDDING_CONTEXT_LENGTH;
+    delete process.env.ORCAROUTER_URL;
+    delete process.env.ORCAROUTER_API_KEY;
+    delete process.env.ORCAROUTER_SEND_DIMENSIONS;
+  });
+
+  afterEach(() => {
+    resetEmbeddingConfig();
+    resetEmbeddingProvider();
+    process.env = { ...originalEnv };
+  });
+
+  it("config validation rejects construction when ORCAROUTER_API_KEY is missing", async () => {
+    // The API key is checked at config-load time (loadEmbeddingConfig), not at
+    // factory invocation, so the throw surfaces inside getEmbeddingProvider().
+    process.env.EMBEDDING_PROVIDER = "orcarouter";
+    process.env.EMBEDDING_MODEL = "google/gemini-embedding-001";
+    process.env.EMBEDDING_DIMENSIONS = "3072";
+    // Intentionally no ORCAROUTER_API_KEY.
+
+    await expect(getEmbeddingProvider()).rejects.toThrow(/ORCAROUTER_API_KEY is required/);
+  });
+
+  it("ensureReady throws an actionable error when the gateway is unreachable", async () => {
+    process.env.EMBEDDING_PROVIDER = "orcarouter";
+    process.env.ORCAROUTER_API_KEY = "or_test_key";
+    process.env.EMBEDDING_MODEL = "google/gemini-embedding-001";
+    process.env.EMBEDDING_DIMENSIONS = "3072";
+    // Closed port → SDK fails fast with a connection error, not an auth error.
+    process.env.ORCAROUTER_URL = "http://127.0.0.1:1/v1";
+
+    const provider = await getEmbeddingProvider();
+    await expect(provider.ensureReady()).rejects.toThrow(
+      /OrcaRouter is not reachable at http:\/\/127\.0\.0\.1:1\/v1/,
+    );
+  });
+
+  it("healthCheck reports missing API key without making any network call", async () => {
+    process.env.EMBEDDING_PROVIDER = "orcarouter";
+    process.env.ORCAROUTER_API_KEY = "or_test_key";
+    process.env.EMBEDDING_MODEL = "google/gemini-embedding-001";
+    process.env.EMBEDDING_DIMENSIONS = "3072";
+    // Even with a deliberately closed port, missing-key path must short-circuit
+    // before the SDK attempts a connection, so the test stays deterministic.
+    process.env.ORCAROUTER_URL = "http://127.0.0.1:1/v1";
+
+    const provider = await getEmbeddingProvider();
+    // Now drop the key for the health-check call only — the provider re-reads
+    // process.env on each invocation (intentional, see provider-orcarouter.ts).
+    delete process.env.ORCAROUTER_API_KEY;
+
+    const health = await provider.healthCheck();
+    expect(health.available).toBe(false);
+    expect(health.modelReady).toBe(false);
+    expect(health.statusLines.some((l) => l.includes("OrcaRouter API key") && l.includes("Missing"))).toBe(true);
+  });
+
+  it("healthCheck reports unreachable gateway without throwing", async () => {
+    process.env.EMBEDDING_PROVIDER = "orcarouter";
+    process.env.ORCAROUTER_API_KEY = "or_test_key";
+    process.env.EMBEDDING_MODEL = "google/gemini-embedding-001";
+    process.env.EMBEDDING_DIMENSIONS = "3072";
+    process.env.ORCAROUTER_URL = "http://127.0.0.1:1/v1";
+
+    const provider = await getEmbeddingProvider();
+    const health = await provider.healthCheck();
+
+    expect(health.available).toBe(false);
+    expect(health.modelReady).toBe(false);
+    expect(
+      health.statusLines.some(
+        (l) => l.includes("OrcaRouter") && l.includes("Not reachable"),
       ),
     ).toBe(true);
   });
