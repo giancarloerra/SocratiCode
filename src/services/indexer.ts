@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 
-import { createHash } from "node:crypto";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { type Lang, parse } from "@ast-grep/napi";
@@ -13,6 +12,7 @@ import {
   EXTENSION_LANGUAGE_MAP,
   EXTRA_EXTENSIONS,
   getLanguageFromExtension,
+  hashContent,
   INDEX_BATCH_SIZE,
   indexExtensionlessEnabled,
   MAX_AVG_LINE_LENGTH,
@@ -27,7 +27,7 @@ import {
   splitTextToCharCap,
   uuidFromSeed,
 } from "./chunk-split.js";
-import { ensureDynamicLanguages, gdscriptParserAvailable, getAstGrepLang, rebuildGraph, removeGraph } from "./code-graph.js";
+import { ensureDynamicLanguages, gdscriptParserAvailable, getAstGrepLang, rebuildGraph, removeGraph, shouldRebuildGraph } from "./code-graph.js";
 import { ensureArtifactsIndexed, loadConfig, removeAllArtifacts } from "./context-artifacts.js";
 import { analyzeElixirTemplate, ensureElixirTemplateParsers, isElixirTemplateExtension } from "./elixir-templates.js";
 import { generateEmbeddings, prepareDocumentText } from "./embeddings.js";
@@ -387,10 +387,9 @@ function detectCommonPrefix(hashes: Map<string, string>): string | null {
   return prefix;
 }
 
-/** Hash file content for change detection */
-export function hashContent(content: string): string {
-  return createHash("sha256").update(content).digest("hex").slice(0, 16);
-}
+// `hashContent` now lives in constants.ts, shared with the graph's input
+// recording; re-exported here because this module is where callers look for it.
+export { hashContent };
 
 /** Generate a stable chunk ID as a valid UUID (required by Qdrant) */
 export function chunkId(relativePath: string, startLine: number): string {
@@ -1443,7 +1442,10 @@ export async function indexProject(
   progress.phase = "building code graph";
   onProgress?.("Building code dependency graph...");
   try {
-    const graph = await rebuildGraph(resolvedPath);
+    // The same extra extensions the index was built with: a graph built under
+    // the defaults would drop every leaf node they admit, and the record would
+    // then disagree with the next decision about which set was in force.
+    const graph = await rebuildGraph(resolvedPath, extraExtensions);
     onProgress?.(`Code graph built: ${graph.nodes.length} files, ${graph.edges.length} edges`);
   } catch (graphErr) {
     const graphMsg = graphErr instanceof Error ? graphErr.message : String(graphErr);
@@ -1640,12 +1642,18 @@ export async function updateProjectIndex(
 
   const changedFiles: ChangedFile[] = [];
   const oversizedFiles = new Set<string>();
+  // Files this run tried to read and could not. The index keeps whatever hash
+  // it already held for them, so nothing downstream can tell they went unread —
+  // except the code graph's rebuild gate, which would otherwise take that
+  // stale hash as proof the file is unchanged while a rebuild would drop it.
+  const unreadableFiles = new Set<string>();
 
   for (let i = 0; i < currentFiles.length; i += FILE_SCAN_BATCH) {
     const batch = currentFiles.slice(i, i + FILE_SCAN_BATCH);
     const results = await Promise.all(
       batch.map(async (relativePath): Promise<ChangedFile | null> => {
         const absolutePath = path.join(resolvedPath, relativePath);
+        let read = false;
         try {
           const stat = await fsp.stat(absolutePath);
           if (stat.size > effectiveMaxFileBytes) {
@@ -1654,6 +1662,7 @@ export async function updateProjectIndex(
             return null;
           }
           const content = await fsp.readFile(absolutePath, "utf-8");
+          read = true;
           const contentHash = hashContent(content);
           const existingHash = hashes.get(relativePath);
 
@@ -1666,6 +1675,10 @@ export async function updateProjectIndex(
           });
           return { relativePath, absolutePath, contentHash, chunks, isNew: !existingHash };
         } catch {
+          // Only a stat or read that failed counts: a file that was read and
+          // then failed to chunk is not unreadable, and marking it so would
+          // rebuild the graph on every run for as long as it stayed that way.
+          if (!read) unreadableFiles.add(relativePath);
           return null;
         }
       }),
@@ -1900,22 +1913,72 @@ export async function updateProjectIndex(
   let postIndexCancelled = stopIfCancelled();
   if (postIndexCancelled) return postIndexCancelled;
 
-  // Auto-rebuild code graph if any files changed (Phase F).
+  // Auto-rebuild code graph if any graph input changed (Phase F).
   //
   // While every changed or removed file requires a complete symbol-graph rebuild,
   // bypass the incremental branch and perform one complete graph rebuild.
-  if (added > 0 || updated > 0 || removed > 0) {
-    progress.phase = "building code graph";
+  //
+  // Not every change is one the graph is built from, though. A commit touching
+  // only a README, a fixture, a migration or a manifest the resolver never
+  // reads produces the graph that already exists, and pays the whole rebuild
+  // for it — roughly 7ms per file, so 27s on a large repository, per commit.
+  // `shouldRebuildGraph` answers from the record the last build left of what
+  // it read, and says so only when the change is proven to touch none of it.
+  //
+  // The question is asked whether or not the index itself moved, because the
+  // two sets are not the same: `go.mod`, `project.godot`, a `.uid` sidecar and
+  // (unless INCLUDE_DOT_FILES is set) every ignore file shape the graph while
+  // being indexed by nothing, so a commit touching only one of those has every
+  // counter at zero and still leaves the graph wrong. Gated on a record having
+  // been found: without one there is nothing to argue from, so a project that
+  // has never been built under this scheme keeps the old trigger and the first
+  // update that changes anything is what rebuilds and writes the record.
+  const indexChanged = added > 0 || updated > 0 || removed > 0;
+  {
     const totalChanged = changedFiles.length + removedRelPaths.length;
 
     try {
-      onProgress?.(
-        totalChanged > 0
-          ? `Building code dependency graph (${totalChanged} file(s) changed, full rebuild)...`
-          : "Building code dependency graph (full rebuild)...",
+      // `hashes` has already been brought up to date above — changed files
+      // carry their new hash and removed ones are gone — so it answers "what
+      // is in this file now" for everything the index holds, and the graph's
+      // recorded inputs are compared against it without reading anything
+      // twice. Inputs the index does not hold are read by the decision itself.
+      const decision = await shouldRebuildGraph(
+        resolvedPath,
+        {
+          hasAdditions: changedFiles.some((file) => file.isNew),
+          changed: new Map(changedFiles.map((file) => [file.relativePath, file.contentHash])),
+          removed: new Set(removedRelPaths),
+          unreadable: unreadableFiles,
+          knownHash: (relativePath) => hashes.get(relativePath),
+        },
+        extraExtensions,
       );
-      const graph = await rebuildGraph(resolvedPath, { skipSymbolGraph: false });
-      onProgress?.(`Code graph built: ${graph.nodes.length} files, ${graph.edges.length} edges`);
+
+      if (!decision.rebuild || !(indexChanged || decision.graphExists)) {
+        if (indexChanged) {
+          logger.info("Code graph rebuild skipped: the change touched no graph input", {
+            projectPath: resolvedPath,
+            filesChanged: totalChanged,
+          });
+          onProgress?.(
+            `Code graph unchanged (${totalChanged} file(s) changed, none of them a graph input)`,
+          );
+        }
+      } else {
+        progress.phase = "building code graph";
+        logger.info("Rebuilding code graph", { projectPath: resolvedPath, reason: decision.reason });
+        onProgress?.(
+          totalChanged > 0
+            ? `Building code dependency graph (${totalChanged} file(s) changed, full rebuild)...`
+            : `Building code dependency graph (${decision.reason})...`,
+        );
+        const graph = await rebuildGraph(resolvedPath, {
+          skipSymbolGraph: false,
+          extraExtensions,
+        });
+        onProgress?.(`Code graph built: ${graph.nodes.length} files, ${graph.edges.length} edges`);
+      }
     } catch (graphErr) {
       const graphMsg = graphErr instanceof Error ? graphErr.message : String(graphErr);
       logger.warn("Code graph build failed during incremental update (non-fatal)", { projectPath: resolvedPath, error: graphMsg });

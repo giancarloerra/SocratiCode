@@ -90,19 +90,57 @@ export function detectExtensionFromSource(source: string): string | null {
  * not indexable code.
  */
 export async function resolveExtensionlessExtensionStrict(absolutePath: string): Promise<string | null> {
-  if (!indexExtensionlessEnabled()) return null;
+  return (await resolveExtensionlessDetectionStrict(absolutePath)).extension;
+}
+
+/** What a head-read decided, together with the bytes it decided on. */
+export interface ExtensionlessDetection {
+  /** The canonical extension detected, or null for a genuine non-match. */
+  extension: string | null;
+  /**
+   * The head the answer was scored on, or null when nothing was read at all —
+   * detection disabled, a {@link SPECIAL_FILES} name, or a non-regular file.
+   *
+   * A caller that records what the build consumed needs this: the answer was
+   * derived from these bytes and from nothing else, so they are the thing to
+   * watch. Watching the file's size instead would miss a same-length edit that
+   * flips the answer (`# hello!!` becoming `#!/bin/sh`), and watching its whole
+   * content would hash bytes the decision never saw.
+   */
+  head: string | null;
+  /**
+   * Whether the head-read was attempted and threw, as opposed to never being
+   * attempted. A caller recording what the build consumed needs the two apart:
+   * a file it could not open may start being code the moment it can be read,
+   * while one it never opened (detection off, a {@link SPECIAL_FILES} name, a
+   * FIFO) is not an input at all.
+   */
+  unreadable: boolean;
+}
+
+/**
+ * Like {@link resolveExtensionlessExtensionStrict}, but also reports the head
+ * the detection ran on. Throws on a read/stat failure for the same reason the
+ * strict variant does.
+ */
+export async function resolveExtensionlessDetectionStrict(
+  absolutePath: string,
+): Promise<ExtensionlessDetection> {
+  const nothingRead: ExtensionlessDetection = { extension: null, head: null, unreadable: false };
+  if (!indexExtensionlessEnabled()) return nothingRead;
   // SPECIAL_FILES (Makefile, Dockerfile, …) are extensionless but handled by
   // name; never route them through content detection, so the graph paths stay
   // consistent with the index (getIndexableFiles filters them via isIndexableFile)
   // and a shell-recipe Makefile is not mis-graphed as a shell node.
-  if (SPECIAL_FILES.has(path.basename(absolutePath))) return null;
+  if (SPECIAL_FILES.has(path.basename(absolutePath))) return nothingRead;
   // Only a regular file can be head-read. glob({nodir:true}) still yields
   // FIFOs/sockets/devices, and opening a FIFO for read blocks until a writer
   // appears — which would wedge the whole scan. lstat and drop non-regular
   // files (the watcher's isIndexableFile guards the same way).
   const stats = await fsp.lstat(absolutePath);
-  if (!stats.isFile()) return null;
-  return detectExtensionFromSource(await readFileHead(absolutePath));
+  if (!stats.isFile()) return nothingRead;
+  const head = await readFileHead(absolutePath);
+  return { extension: detectExtensionFromSource(head), head, unreadable: false };
 }
 
 /**
@@ -113,8 +151,19 @@ export async function resolveExtensionlessExtensionStrict(absolutePath: string):
  * `getAstGrepLang(result) !== null`.
  */
 export async function resolveExtensionlessExtension(absolutePath: string): Promise<string | null> {
+  return (await resolveExtensionlessDetection(absolutePath)).extension;
+}
+
+/**
+ * {@link resolveExtensionlessExtension}, reporting the head the answer was
+ * scored on so a caller can record what it consumed. A failure reads as
+ * "nothing was read", which is what it was.
+ */
+export async function resolveExtensionlessDetection(
+  absolutePath: string,
+): Promise<ExtensionlessDetection> {
   try {
-    return await resolveExtensionlessExtensionStrict(absolutePath);
+    return await resolveExtensionlessDetectionStrict(absolutePath);
   } catch (err) {
     // ENOENT (file deleted/renamed between scan and read) is an expected skip.
     // A non-ENOENT fault (EACCES, EIO) means a possibly-code file we could not
@@ -125,6 +174,6 @@ export async function resolveExtensionlessExtension(absolutePath: string): Promi
         error: err instanceof Error ? err.message : String(err),
       });
     }
-    return null;
+    return { extension: null, head: null, unreadable: true };
   }
 }
