@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import fs from "node:fs/promises";
 import path from "node:path";
+import type { GraphInputRecorder } from "./graph-inputs.js";
 import { logger } from "./logger.js";
 
 // ── Path alias resolution ────────────────────────────────────────────────
@@ -23,13 +24,17 @@ const EMPTY_ALIASES: PathAliases = { entries: new Map() };
  *
  * Returns empty aliases if no config is found (graceful degradation).
  */
-export async function loadPathAliases(projectPath: string): Promise<PathAliases> {
+export async function loadPathAliases(
+  projectPath: string,
+  recorder?: GraphInputRecorder,
+): Promise<PathAliases> {
   const configNames = ["tsconfig.json", "jsconfig.json"];
 
   for (const name of configNames) {
     const configPath = path.join(projectPath, name);
     try {
       const raw = await fs.readFile(configPath, "utf-8");
+      recorder?.read(configPath, raw);
       const aliases = parsePathAliases(raw, projectPath);
       if (aliases.entries.size > 0) {
         logger.info("Loaded path aliases", {
@@ -39,7 +44,7 @@ export async function loadPathAliases(projectPath: string): Promise<PathAliases>
         return aliases;
       }
       // Config exists but has no paths — follow extends chain
-      const extended = await followExtendsChain(configPath, projectPath);
+      const extended = await followExtendsChain(configPath, projectPath, recorder);
       if (extended.entries.size > 0) {
         logger.info("Loaded path aliases via extends", {
           config: name,
@@ -49,7 +54,11 @@ export async function loadPathAliases(projectPath: string): Promise<PathAliases>
       }
       // No paths in entire chain — try next config file
     } catch {
-      // Config not found — try next
+      // Config not found, or found and unreadable — try next. Either way the
+      // build looked here and got nothing, and a config appearing (or becoming
+      // readable) changes the aliases, so it is an input. `read` above takes
+      // precedence, so this only lands when nothing was read.
+      recorder?.unreadable(configPath);
     }
   }
 
@@ -66,6 +75,7 @@ const MAX_EXTENDS_DEPTH = 10;
 async function followExtendsChain(
   configPath: string,
   _projectPath: string,
+  recorder?: GraphInputRecorder,
 ): Promise<PathAliases> {
   const visited = new Set<string>();
   let currentPath = configPath;
@@ -79,8 +89,13 @@ async function followExtendsChain(
     try {
       raw = await fs.readFile(resolved, "utf-8");
     } catch {
+      recorder?.unreadable(resolved);
       break; // file not found
     }
+    // Every config the chain reaches shapes the aliases, including one outside
+    // the project — a base config in a parent directory is recorded relative
+    // to the root and read back through the same relative path.
+    recorder?.read(resolved, raw);
 
     const config = parseTsconfigJson(raw);
     if (!config) break;

@@ -100,6 +100,40 @@ export interface IgnoreFilter {
    * directory and nothing on the marker inside it.
    */
   isEnvironmentRoot(relativePath: string): boolean;
+  /**
+   * The ignore files this filter read, project-relative and in the order they
+   * were applied, each with the bytes it was built from.
+   *
+   * A filter's answers are read off the tree once, when it is built, so
+   * anything caching a walk this filter shaped has to know which files to
+   * watch — the code graph records them as build inputs. The content comes
+   * with the path rather than being read again by the caller: a second read
+   * would both cost a second pass and leave a window in which the file changes
+   * between the two, recording a state the walk never actually ran under.
+   * Reported from where they are read, so a new source cannot be added without
+   * appearing here.
+   */
+  sources: IgnoreSource[];
+  /**
+   * The environment roots the walk discovered, each as `dir/` relative to the
+   * project root.
+   *
+   * Reported for the same reason as {@link IgnoreFilter.sources}: they are an
+   * input to what this filter answers, and unlike the ignore files they are
+   * not files at all — a directory is an environment because of a marker
+   * *inside* it, somewhere nothing that reads the tree will ever look again.
+   * A caller caching a walk has to watch them, or a `pyvenv.cfg` deleted
+   * re-admits a whole subtree with nothing observable having changed.
+   */
+  environments: string[];
+}
+
+/** One ignore file a filter was built from. */
+export interface IgnoreSource {
+  /** Project-relative, forward-slashed. */
+  path: string;
+  /** The bytes the filter was built from. */
+  content: string;
 }
 
 /**
@@ -120,6 +154,7 @@ export interface IgnoreFilter {
 export function createIgnoreFilter(projectPath: string): IgnoreFilter {
   const ig = ignore();
   const environments: string[] = [];
+  const sources: IgnoreSource[] = [];
 
   // Default patterns
   ig.add(DEFAULT_IGNORE_PATTERNS);
@@ -133,6 +168,7 @@ export function createIgnoreFilter(projectPath: string): IgnoreFilter {
     if (fs.existsSync(rootGitignore)) {
       const content = fs.readFileSync(rootGitignore, "utf-8");
       ig.add(content);
+      sources.push({ path: ".gitignore", content });
     }
   } else {
     logger.debug("Skipping .gitignore processing (RESPECT_GITIGNORE=false)");
@@ -142,7 +178,7 @@ export function createIgnoreFilter(projectPath: string): IgnoreFilter {
   // runs whether or not .gitignore is respected: a virtualenv is not a project
   // preference, it is a directory of installed libraries that no reading of the
   // tree should call source.
-  scanNestedIgnoreSources(projectPath, projectPath, ig, environments, respectGitignore);
+  scanNestedIgnoreSources(projectPath, projectPath, ig, environments, respectGitignore, sources);
 
   // .socraticodeignore
   const socraticodeignorePath = path.join(projectPath, ".socraticodeignore");
@@ -150,6 +186,7 @@ export function createIgnoreFilter(projectPath: string): IgnoreFilter {
   if (fs.existsSync(socraticodeignorePath)) {
     const content = fs.readFileSync(socraticodeignorePath, "utf-8");
     ig.add(content);
+    sources.push({ path: ".socraticodeignore", content });
     logger.debug("Loaded .socraticodeignore rules");
   }
 
@@ -166,6 +203,8 @@ export function createIgnoreFilter(projectPath: string): IgnoreFilter {
       const normalized = relativePath.split(path.sep).join("/");
       return environments.includes(normalized.endsWith("/") ? normalized : `${normalized}/`);
     },
+    sources,
+    environments,
   };
 }
 
@@ -274,6 +313,7 @@ function scanNestedIgnoreSources(
   ig: Ignore,
   environments: string[],
   readGitignores: boolean,
+  sources: IgnoreSource[],
 ): void {
   let entries: fs.Dirent[];
   try {
@@ -332,6 +372,9 @@ function scanNestedIgnoreSources(
     if (readGitignores && fs.existsSync(gitignorePath)) {
       const content = fs.readFileSync(gitignorePath, "utf-8");
       const relDir = path.relative(rootPath, dirPath).split(path.sep).join("/");
+      // Recorded on the read, not on the patterns: a file contributing nothing
+      // today is still a file whose next line changes what this filter answers.
+      sources.push({ path: `${relDir}/.gitignore`, content });
 
       // Prefix each pattern with the relative directory
       const lines = content.split("\n");
@@ -354,7 +397,7 @@ function scanNestedIgnoreSources(
     }
 
     // Recurse into subdirectory
-    scanNestedIgnoreSources(rootPath, dirPath, ig, environments, readGitignores);
+    scanNestedIgnoreSources(rootPath, dirPath, ig, environments, readGitignores, sources);
   }
 }
 

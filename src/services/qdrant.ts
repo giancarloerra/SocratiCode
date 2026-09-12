@@ -6,6 +6,7 @@ import { QDRANT_API_KEY, QDRANT_COLLECTION_PREFIX, QDRANT_HOST, QDRANT_PORT, QDR
 import type { ArtifactIndexState, CodeGraph, FileChunk, SearchResult } from "../types.js";
 import { getEmbeddingConfig } from "./embedding-config.js";
 import { generateEmbeddings, generateQueryEmbedding, prepareDocumentText } from "./embeddings.js";
+import type { GraphInputRecord } from "./graph-inputs.js";
 import {
   documentTextProfile,
   type EffectiveIndexProfile,
@@ -1261,6 +1262,7 @@ export async function saveGraphData(
   graphCollName: string,
   projectPath: string,
   graph: CodeGraph,
+  graphInputs: GraphInputRecord,
 ): Promise<void> {
   await ensureMetadataCollection();
   const qdrant = getClient();
@@ -1294,6 +1296,17 @@ export async function saveGraphData(
           nodeCount: graph.nodes.length,
           edgeCount: graph.edges.length,
           importCount,
+          // What this build read, for the next incremental update to check a
+          // change against before paying for a rebuild. Required rather than
+          // optional: a graph saved without it reads as a graph nobody knows
+          // the inputs of, which costs the next update a full rebuild.
+          //
+          // `?? null` is not dead: `tsconfig.json` compiles `src/**/*` only, so
+          // a caller in `tests/` can omit the argument without the type system
+          // noticing, and `JSON.stringify(undefined)` returns `undefined` — a
+          // payload value the point would either reject or silently drop. Null
+          // reads back as "no record", which costs one rebuild instead.
+          graphInputs: JSON.stringify(graphInputs ?? null),
           graphData: JSON.stringify(graph),
         },
       },
@@ -1351,6 +1364,54 @@ export async function getGraphMetadata(graphCollName: string): Promise<{
       error: err instanceof Error ? err.message : String(err),
     });
     return null;
+  }
+}
+
+/**
+ * What is stored about the graph's inputs, and whether anything is stored at
+ * all — three outcomes the caller must not confuse.
+ */
+export type GraphInputsLoad =
+  /** No metadata point: this project has no persisted graph. */
+  | { status: "absent" }
+  /** A graph is there. `value` is its record, or undefined on one built before records existed. */
+  | { status: "stored"; value: unknown }
+  /** The read itself failed. Nothing is known, least of all that there is no record. */
+  | { status: "failed"; error: string };
+
+/**
+ * The record of what the graph was built from, without the graph.
+ *
+ * Projected to that one field deliberately. The same point carries
+ * `graphData`, the whole serialized graph — megabytes on a large repository —
+ * and every incremental update asks this question. Pulling the graph across to
+ * answer it would cost more than the rebuild the answer is meant to avoid —
+ * the same amplification that made `listCodebaseCollections` project its
+ * scroll rather than read whole payloads.
+ *
+ * A missing point and a failed read are reported apart, and neither is
+ * reported as "no record". A graph with no record must rebuild once and write
+ * one however quiet the update was; a graph that could not be read tells us
+ * nothing and must be treated as the most conservative of the three; and only
+ * a genuinely absent point means there is no graph here to refresh.
+ */
+export async function loadGraphInputs(graphCollName: string): Promise<GraphInputsLoad> {
+  try {
+    const points = await getClient().retrieve(METADATA_COLLECTION, {
+      ids: [metadataPointId(graphCollName)],
+      with_payload: { include: ["graphInputs"] },
+      with_vector: false,
+    });
+    if (points.length === 0) return { status: "absent" };
+    const payload = points[0].payload as Record<string, unknown> | null | undefined;
+    return { status: "stored", value: payload?.graphInputs };
+  } catch (err) {
+    // A missing collection is a missing graph. Anything else is a failure to
+    // find out, which is not the same answer and must not read like one.
+    if (isNotFoundError(err)) return { status: "absent" };
+    const error = err instanceof Error ? err.message : String(err);
+    logger.warn("loadGraphInputs failed", { graphCollName, error });
+    return { status: "failed", error };
   }
 }
 

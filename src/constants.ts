@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 
+import { createHash } from "node:crypto";
 import { createRequire } from "node:module";
 
 // ── Package metadata ─────────────────────────────────────────────────────
@@ -286,6 +287,19 @@ export const ENTRY_POINT_NAMES: Record<string, Set<string>> = {
  */
 export function toForwardSlash(p: string): string {
   return p.replace(/\\/g, "/");
+}
+
+/**
+ * Hash file content for change detection.
+ *
+ * Lives here rather than beside its first caller because two independent
+ * change detectors now compare against it — the index's own file-hash map and
+ * the code graph's recorded inputs — and a second implementation of "the hash
+ * of this file" would let the two disagree about whether a file changed while
+ * both looked correct.
+ */
+export function hashContent(content: string): string {
+  return createHash("sha256").update(content).digest("hex").slice(0, 16);
 }
 
 // ── File type configuration ─────────────────────────────────────────────

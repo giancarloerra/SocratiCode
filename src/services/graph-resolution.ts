@@ -6,6 +6,7 @@ import { parse as parseToml, type TomlTable, type TomlValue } from "smol-toml";
 import { toForwardSlash } from "../constants.js";
 import { extractClassNameFromGdscript } from "./gdscript-syntax.js";
 import type { PathAliases } from "./graph-aliases.js";
+import type { GraphInputRecorder } from "./graph-inputs.js";
 import { extractSymbolsAndCalls } from "./graph-symbols.js";
 import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
 
@@ -89,6 +90,7 @@ export function buildJvmSuffixMap(fileSet: Set<string>): Map<string, string> {
 export function buildCsNamespaceMap(
   fileSet: Set<string>,
   projectPath: string,
+  recorder?: GraphInputRecorder,
 ): Map<string, string[]> {
   const map = new Map<string, string[]>();
   // Match both `namespace Foo.Bar { ... }` and the file-scoped C# 10+
@@ -110,11 +112,13 @@ export function buildCsNamespaceMap(
 
   for (const f of csFiles) {
     let source: string;
+    const absPath = path.join(projectPath, f);
     try {
-      source = readFileSync(path.join(projectPath, f), "utf-8");
+      source = readFileSync(absPath, "utf-8");
     } catch {
       continue;
     }
+    recorder?.read(absPath, source);
     for (const match of source.matchAll(namespaceRegex)) {
       const ns = match[1];
       const existing = map.get(ns);
@@ -210,7 +214,7 @@ function findComposerManifests(projectPath: string): string[] {
  *
  * Call this once per graph build and pass the result to resolveImport.
  */
-export function buildPhpPsr4Map(projectPath: string): Map<string, string[]> {
+export function buildPhpPsr4Map(projectPath: string, recorder?: GraphInputRecorder): Map<string, string[]> {
   const map = new Map<string, string[]>();
   const root = path.resolve(projectPath);
 
@@ -218,8 +222,14 @@ export function buildPhpPsr4Map(projectPath: string): Map<string, string[]> {
     const manifest = path.join(root, relManifest);
     let parsed: unknown;
     try {
-      parsed = JSON.parse(readFileSync(manifest, "utf8"));
+      const source = readFileSync(manifest, "utf8");
+      recorder?.read(manifest, source);
+      parsed = JSON.parse(source);
     } catch {
+      // A manifest the walk found and this could not read is still an input:
+      // it is not a graph node, so nothing else would notice it recovering.
+      // `read` above wins where it ran, so this only lands on a failed read.
+      recorder?.unreadable(manifest);
       continue; // malformed manifest — the other manifests still count
     }
     if (typeof parsed !== "object" || parsed === null) continue;
@@ -325,6 +335,7 @@ interface PhpSourceMatch {
 export function buildPhpFqcnMap(
   fileSet: Set<string>,
   projectPath: string,
+  recorder?: GraphInputRecorder,
 ): Map<string, string[]> {
   const map = new Map<string, string[]>();
   // `namespace Foo\Bar;` (file-scoped) and `namespace Foo\Bar {` (braced).
@@ -347,11 +358,13 @@ export function buildPhpFqcnMap(
 
   for (const file of phpFiles) {
     let source: string;
+    const absPath = path.join(projectPath, file);
     try {
-      source = readFileSync(path.join(projectPath, file), "utf8");
+      source = readFileSync(absPath, "utf8");
     } catch {
       continue;
     }
+    recorder?.read(absPath, source);
 
     // Namespaces in declaration order, so each type can be attributed to the
     // one in effect where it appears.
@@ -405,15 +418,21 @@ export interface GoModuleInfo {
 }
 
 /** Map each in-project Elixir `defmodule` name to its files, deterministically. */
-export function buildElixirModuleMap(fileSet: Set<string>, projectPath: string): Map<string, string[]> {
+export function buildElixirModuleMap(
+  fileSet: Set<string>,
+  projectPath: string,
+  recorder?: GraphInputRecorder,
+): Map<string, string[]> {
   const map = new Map<string, string[]>();
   for (const file of [...fileSet].filter((f) => [".ex", ".exs"].includes(path.extname(f).toLowerCase())).sort()) {
     let source: string;
+    const absPath = path.join(projectPath, file);
     try {
-      source = readFileSync(path.join(projectPath, file), "utf8");
+      source = readFileSync(absPath, "utf8");
     } catch {
       continue;
     }
+    recorder?.read(absPath, source);
     const symbols = extractSymbolsAndCalls(source, "elixir", path.extname(file), file).symbols;
     for (const symbol of symbols) {
       if (symbol.kind !== "module" || symbol.name === "<module>") continue;
@@ -477,6 +496,7 @@ export function buildElixirModuleMap(fileSet: Set<string>, projectPath: string):
 export function buildGoModuleInfo(
   fileSet: Set<string>,
   projectPath: string,
+  recorder?: GraphInputRecorder,
 ): GoModuleInfo[] {
   const goModPaths = findGoModFiles(projectPath);
   if (goModPaths.length === 0) return [];
@@ -489,11 +509,14 @@ export function buildGoModuleInfo(
   const rawModules: RawModule[] = [];
   for (const goModRel of goModPaths) {
     let goModSource: string;
+    const goModAbs = path.join(projectPath, goModRel);
     try {
-      goModSource = readFileSync(path.join(projectPath, goModRel), "utf-8");
+      goModSource = readFileSync(goModAbs, "utf-8");
     } catch {
+      recorder?.unreadable(goModAbs);
       continue;
     }
+    recorder?.read(goModAbs, goModSource);
 
     // Match `module <path>` at the start of a line, allowing leading
     // horizontal whitespace and capturing the path token greedily up to
@@ -690,16 +713,19 @@ function findPubspecFiles(projectPath: string): string[] {
  *
  * Call this once per graph build and pass the result to resolveImport.
  */
-export function buildDartPackageMap(projectPath: string): Map<string, string> {
+export function buildDartPackageMap(projectPath: string, recorder?: GraphInputRecorder): Map<string, string> {
   const map = new Map<string, string>();
   const root = path.resolve(projectPath);
   for (const relManifest of findPubspecFiles(root)) {
     let source: string;
+    const manifestAbs = path.join(root, relManifest);
     try {
-      source = readFileSync(path.join(root, relManifest), "utf8");
+      source = readFileSync(manifestAbs, "utf8");
     } catch {
+      recorder?.unreadable(manifestAbs);
       continue; // unreadable manifest — the other manifests still count
     }
+    recorder?.read(manifestAbs, source);
     // A UTF-8 BOM sits before the first line's `name:` and would defeat the
     // column-0 anchor below — `dart pub get` accepts a BOM'd manifest, so
     // without this the package silently loses every package: edge again.
@@ -828,7 +854,7 @@ export interface PythonManifest {
  * Call this once per graph build and pass each file's scoped roots (see
  * {@link pythonRootsForFile}) to resolveImport.
  */
-export function buildPythonManifests(projectPath: string): PythonManifest[] {
+export function buildPythonManifests(projectPath: string, recorder?: GraphInputRecorder): PythonManifest[] {
   const root = path.resolve(projectPath);
   const relManifests = findPyProjectManifests(root);
   const dirs = relManifests.map((m) => toForwardSlash(path.dirname(m))); // "." at the root
@@ -836,9 +862,12 @@ export function buildPythonManifests(projectPath: string): PythonManifest[] {
   return relManifests.map((relManifest, i) => {
     const dir = dirs[i];
     let source = "";
+    const manifestAbs = path.join(root, relManifest);
     try {
-      source = readFileSync(path.join(root, relManifest), "utf8");
+      source = readFileSync(manifestAbs, "utf8");
+      recorder?.read(manifestAbs, source);
     } catch {
+      recorder?.unreadable(manifestAbs);
       // Unreadable manifest still contributes its roots; it just declares no
       // members, so it scopes to its own subtree.
     }
@@ -1443,7 +1472,11 @@ function extractCargoAliases(
  *
  * Call this once per graph build and pass the result to resolveImport.
  */
-export function buildRustCrateMap(fileSet: Set<string>, projectPath: string): RustCrate[] {
+export function buildRustCrateMap(
+  fileSet: Set<string>,
+  projectPath: string,
+  recorder?: GraphInputRecorder,
+): RustCrate[] {
   const root = path.resolve(projectPath);
   const relManifests = findCargoManifests(root);
   if (relManifests.length === 0) return [];
@@ -1454,9 +1487,15 @@ export function buildRustCrateMap(fileSet: Set<string>, projectPath: string): Ru
   for (const relManifest of relManifests) {
     const dir = toForwardSlash(path.dirname(relManifest)); // "." at the root
     let manifest: CargoTable | null = null;
+    const manifestAbs = path.join(root, relManifest);
     try {
-      manifest = asTable(parseToml(readFileSync(path.join(root, relManifest), "utf8").replace(/^\uFEFF/, "")));
+      // Recorded before the BOM is stripped: the record describes the bytes on
+      // disk, which is what the next update re-hashes.
+      const source = readFileSync(manifestAbs, "utf8");
+      recorder?.read(manifestAbs, source);
+      manifest = asTable(parseToml(source.replace(/^\uFEFF/, "")));
     } catch {
+      recorder?.unreadable(manifestAbs);
       // Unreadable or malformed manifest: its convention targets still count.
     }
     parsedManifests.push({ relManifest, dir, manifest });
@@ -2328,6 +2367,7 @@ export function buildGodotUidIndexes(
   projectPath: string,
   fileSet: Set<string>,
   rootCache: GodotRootCache = new Map(),
+  recorder?: GraphInputRecorder,
 ): GodotProjectUidIndexes {
   const indexes: GodotProjectUidIndexes = new Map();
 
@@ -2345,7 +2385,12 @@ export function buildGodotUidIndexes(
       }
 
       try {
-        const content = readFileSync(absPath, "utf-8").trim();
+        // A `.uid` sidecar is never a graph node, so this read is the only
+        // place it is seen. Recorded whole, before the trim, so the hash
+        // describes the file rather than what was parsed out of it.
+        const raw = readFileSync(absPath, "utf-8");
+        recorder?.read(absPath, raw);
+        const content = raw.trim();
         if (content.startsWith("uid://")) {
           // The resource file is the .uid path without the .uid suffix
           const resourcePath = relPath.slice(0, -4); // strip ".uid"
@@ -2353,7 +2398,9 @@ export function buildGodotUidIndexes(
           if (fileSet.has(resourcePath)) index.set(content, resourcePath);
         }
       } catch {
-        // Skip unreadable files
+        // A sidecar is never a graph node, so the main read loop skips it and
+        // this is the only place it is seen — including when it fails.
+        recorder?.unreadable(absPath);
       }
       continue;
     }
@@ -2372,6 +2419,7 @@ export function buildGodotUidIndexes(
 
       try {
         const content = readFileSync(absPath, "utf-8");
+        recorder?.read(absPath, content);
         // The uid attribute appears in the first section header:
         // [gd_scene ... uid="uid://..."] or [gd_resource ... uid="uid://..."]
         const match = content.match(/^\[gd_(?:scene|resource)\b[^\]]*\buid="(uid:\/\/[^"]+)"/m);
@@ -2402,6 +2450,7 @@ export function buildGodotProjectIndexes(
   projectPath: string,
   fileSet: Set<string>,
   rootCache: GodotRootCache = new Map(),
+  recorder?: GraphInputRecorder,
 ): GodotProjectIndexes {
   const indexes: GodotProjectIndexes = new Map();
 
@@ -2432,6 +2481,7 @@ export function buildGodotProjectIndexes(
 
     try {
       const content = readFileSync(absPath, "utf-8");
+      recorder?.read(absPath, content);
       const className = extractClassNameFromGdscript(content);
       if (className) {
         index.set(className, relPath);
@@ -3412,15 +3462,20 @@ function normalizeResPath(resPath: string): string {
  * @param godotProjectRoot - Absolute path to the directory containing project.godot
  * @returns Map of autoload name → relative path (forward-slash, relative to project root)
  */
-export function parseGodotAutoloads(godotProjectRoot: string): Map<string, string> {
+export function parseGodotAutoloads(
+  godotProjectRoot: string,
+  recorder?: GraphInputRecorder,
+): Map<string, string> {
   const autoloads = new Map<string, string>();
   const projectFile = path.join(godotProjectRoot, "project.godot");
   let content: string;
   try {
     content = readFileSync(projectFile, "utf-8");
   } catch {
+    recorder?.unreadable(projectFile);
     return autoloads;
   }
+  recorder?.read(projectFile, content);
 
   // Find the [autoload] section and parse key="value" lines until the next
   // section header or end of file.

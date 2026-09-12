@@ -15,9 +15,19 @@ import type {
   SymbolEdge, SymbolGraphFilePayload, SymbolGraphMeta, SymbolNode, SymbolRef,
 } from "../types.js";
 import { ensureElixirTemplateParsers, isElixirTemplateExtension } from "./elixir-templates.js";
-import { detectExtensionFromSource, resolveExtensionlessExtension } from "./extensionless.js";
+import { detectExtensionFromSource, resolveExtensionlessDetection } from "./extensionless.js";
 import { loadPathAliases } from "./graph-aliases.js";
 import { extractImports } from "./graph-imports.js";
+import {
+  createGraphInputRecorder,
+  decideGraphRebuild,
+  type GraphChangeSummary,
+  type GraphInputRecord,
+  type GraphInputRecorder,
+  type GraphRebuildDecision,
+  graphCapabilitiesHash,
+  scanDirectory,
+} from "./graph-inputs.js";
 import { buildCsNamespaceMap, buildDartPackageMap, buildElixirModuleMap, buildGodotProjectIndexes, buildGodotUidIndexes, buildGoModuleInfo, buildJvmSuffixMap, buildPhpFqcnMap, buildPhpPsr4Map, buildPythonManifests, buildRustCrateMap, type ClassNameIndex, findGodotProjectRootForProject, findGodotRootForFile, type GodotUidIndex, parseGodotAutoloads, pythonRootsForFile, resolveImport } from "./graph-resolution.js";
 import {
   computeUnresolvedPct,
@@ -30,10 +40,10 @@ import {
   rawCallsToUnresolvedEdges,
 } from "./graph-symbols.js";
 
-import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
+import { createIgnoreFilter } from "./ignore.js";
 import { logger } from "./logger.js";
-import { setGdscriptParserAvailable } from "./parser-availability.js";
-import { deleteGraphData, describeQdrantError, getGraphMetadata, loadGraphData, saveGraphData } from "./qdrant.js";
+import { gdscriptParserAvailable, setGdscriptParserAvailable } from "./parser-availability.js";
+import { deleteGraphData, describeQdrantError, getGraphMetadata, loadGraphData, loadGraphInputs, saveGraphData } from "./qdrant.js";
 import {
   dropSymbolGraphCache,
   SymbolGraphCache,
@@ -193,6 +203,85 @@ export interface RebuildGraphOptions {
   skipSymbolGraph?: boolean;
 }
 
+/**
+ * Whether an incremental update has to rebuild the code graph, and why.
+ *
+ * The answer comes from the record the last build left behind — the files it
+ * read and the settings it read them under — never from a predicate describing
+ * which files a graph is built from. There is no such predicate to keep in
+ * step, which is the whole reason the build reports its own inputs.
+ *
+ * Conservative wherever the record cannot settle the question: a project with
+ * no usable record rebuilds once and writes one, and so does any addition, any
+ * settings change, and any recorded input that moved. Only a change proven to
+ * touch nothing the build read is skipped.
+ */
+export async function shouldRebuildGraph(
+  projectPath: string,
+  change: GraphChangeSummary,
+  extraExtensions?: Set<string>,
+): Promise<GraphRebuildDecision> {
+  const resolved = path.resolve(projectPath);
+  try {
+    const graphCollName = graphCollectionName(projectIdFromPath(resolved));
+    const load = await loadGraphInputs(graphCollName);
+    if (load.status === "absent") {
+      // Nothing persisted: there is no graph here to refresh, and building one
+      // is not something an update that indexed nothing should decide to do.
+      return { rebuild: true, reason: "no code graph has been built yet", graphExists: false };
+    }
+    if (load.status === "failed") {
+      // A graph is presumed to be there and nothing is known about it, which
+      // is the most conservative of the three outcomes, not the quietest.
+      return {
+        rebuild: true,
+        reason: `the graph's stored inputs could not be read: ${load.error}`,
+        graphExists: true,
+      };
+    }
+    return await decideGraphRebuild(
+      resolved,
+      load.value,
+      change,
+      extraExtensions ?? EXTRA_EXTENSIONS,
+      await currentGraphCapabilities(),
+    );
+  } catch (err) {
+    // Failing to answer is not an answer. Anything unexpected here leaves the
+    // caller doing exactly what it did before this gate existed.
+    logger.warn("Could not decide whether the code graph needs rebuilding — rebuilding", {
+      projectPath: resolved,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return {
+      rebuild: true,
+      reason: "the record of the last build could not be read",
+      graphExists: true,
+    };
+  }
+}
+
+/**
+ * The parsers this process actually has, as one hash.
+ *
+ * Read after {@link ensureDynamicLanguages} has run, which every path into the
+ * build and the decision does first, so it describes the process answering
+ * rather than some other one.
+ */
+export async function currentGraphCapabilities(): Promise<string> {
+  return graphCapabilitiesHash({
+    loadedGrammars: getDynamicLanguageStatus().loaded,
+    gdscript: gdscriptParserAvailable,
+    // Resolved unconditionally, not only where the project has templates: the
+    // build and the decision have to answer this the same way or every Elixir
+    // project rebuilds on every update. The loader memoises its own promise,
+    // so this is a 10ms WASM load once per process and free thereafter — and
+    // it is load-bearing, since both import and symbol extraction fall back to
+    // a line/leaf approximation when the grammars are missing.
+    elixirTemplates: await ensureElixirTemplateParsers(),
+  });
+}
+
 /** Force-rebuild, cache, and persist a graph.
  * If a build is already in progress for this project, returns the existing
  * in-flight promise (deduplication — same as indexer concurrency guard).
@@ -250,7 +339,7 @@ async function doRebuildGraph(
     progress.phase = "persisting";
     const projectId = projectIdFromPath(resolvedPath);
     const graphCollName = graphCollectionName(projectId);
-    await saveGraphData(graphCollName, resolvedPath, graph);
+    await saveGraphData(graphCollName, resolvedPath, graph, built.graphInputs);
 
     // Build & persist symbol graph (resolution + sharded persistence) — unless
     // the caller asked to skip it (Phase F watcher path).
@@ -854,8 +943,36 @@ export function getAstGrepLang(
 export async function getGraphableFiles(
   projectPath: string,
   extraExts?: Set<string>,
+  recorder?: GraphInputRecorder,
 ): Promise<{ files: string[]; detectedExts: Map<string, string> }> {
   const ig = createIgnoreFilter(projectPath);
+  // The ignore files shaped this walk, so they are inputs to the graph as much
+  // as any source file is: a rule added to one can add or remove nodes without
+  // a single source file changing. The filter hands over the bytes it was
+  // built from, so this records the state the walk actually ran under rather
+  // than whatever a second read would find.
+  if (recorder) {
+    for (const source of ig.sources) {
+      recorder.read(path.join(projectPath, source.path), source.content);
+    }
+    // An environment root is excluded because of a marker inside it, and the
+    // walk never enters it — so nothing below would ever be listed, and the
+    // parent's listing does not move when the marker goes. List the root
+    // itself: `pyvenv.cfg` disappearing is then an entry-name change like any
+    // other, and the subtree it re-admits is not missed.
+    for (const environment of ig.environments) {
+      const absolute = path.join(projectPath, environment);
+      try {
+        const entries = await fs.readdir(absolute, { withFileTypes: true });
+        recorder.directory(absolute, scanDirectory(ig, projectPath, absolute, entries).listing);
+      } catch {
+        // A directory, so it is re-checked with a `readdir` like any other —
+        // the file bucket's readability test would answer a question nobody
+        // asked of it.
+        recorder.unreadableDirectory(absolute);
+      }
+    }
+  }
   const extras = extraExts ?? EXTRA_EXTENSIONS;
   const files: string[] = [];
   const detectedExts = new Map<string, string>();
@@ -884,14 +1001,25 @@ export async function getGraphableFiles(
           error: err instanceof Error ? err.message : String(err),
         });
       }
+      // The subtree contributed nothing, and nothing else records that it was
+      // even reached: the parent's listing holds this directory's name either
+      // way, so a subtree that becomes listable would otherwise add nodes with
+      // no recorded input having moved.
+      recorder?.unreadableDirectory(dir);
       return;
     }
 
-    for (const entry of entries) {
+    // The listing itself is an input: it is the only read that can tell the
+    // next update a file appeared — including the ones no index holds, like a
+    // nested `go.mod` or a `.uid` sidecar. The filter is applied here, once,
+    // by the same function the rebuild check re-reads the directory with, and
+    // the walk iterates what it kept rather than asking the filter again.
+    const { kept, listing } = scanDirectory(ig, projectPath, dir, entries);
+    recorder?.directory(dir, listing);
+
+    for (const entry of kept) {
       const fullPath = path.join(dir, entry.name);
       const relPath = toForwardSlash(path.relative(projectPath, fullPath));
-
-      if (shouldIgnore(ig, entry.isDirectory() ? `${relPath}/` : relPath)) continue;
 
       if (entry.isDirectory()) {
         await walk(fullPath);
@@ -914,10 +1042,21 @@ export async function getGraphableFiles(
           // extra-extension files and mixed Elixir templates are grammar-less).
           // Extensionless dotfiles are skipped unless INCLUDE_DOT_FILES, to stay
           // consistent with the index (see includeDotFiles above).
-          const detected = await resolveExtensionlessExtension(fullPath);
+          const { extension: detected, head, unreadable } = await resolveExtensionlessDetection(fullPath);
           if (detected && getAstGrepLang(detected) !== null) {
             files.push(relPath);
             detectedExts.set(relPath, detected);
+          } else if (unreadable) {
+            // The head-read threw. Nothing was scored, so there is no head to
+            // watch — but the file becoming readable could make it a node, and
+            // no other bucket would move when it does.
+            recorder?.unreadable(fullPath);
+          } else if (head !== null) {
+            // Read to decide, and turned away. Those bytes decided the shape of
+            // the file set, so they are what is watched — the head, not the
+            // whole file (which was never read) and not the size (which a
+            // same-length edit can flip the answer without moving).
+            recorder?.head(fullPath, head);
           }
         }
       }
@@ -967,12 +1106,21 @@ export async function buildCodeGraph(
    * them from that path's candidates. Resolution input only, never persisted.
    */
   rustInlineDeclaredSymbols: Map<string, string>;
+  /**
+   * Every input this build consumed, for the next incremental update to check
+   * a change against. Reported from the build rather than described beside it,
+   * so no second answer to "does this file contribute to the graph?" exists to
+   * drift from this one.
+   */
+  graphInputs: GraphInputRecord;
 }> {
   ensureDynamicLanguages();
 
   const resolvedPath = path.resolve(projectPath);
-  const aliases = await loadPathAliases(resolvedPath);
-  const { files, detectedExts } = await getGraphableFiles(resolvedPath, extraExtensions);
+  const recorder = createGraphInputRecorder(resolvedPath);
+  const effectiveExtras = extraExtensions ?? EXTRA_EXTENSIONS;
+  const aliases = await loadPathAliases(resolvedPath, recorder);
+  const { files, detectedExts } = await getGraphableFiles(resolvedPath, extraExtensions, recorder);
   const fileSet = new Set(files);
   if (files.some((file) => isElixirTemplateExtension(path.extname(file)))) {
     await ensureElixirTemplateParsers();
@@ -989,13 +1137,13 @@ export async function buildCodeGraph(
   // Per-project Godot indexes: maps each Godot project root to its scoped
   // class_name index. Used for per-file res:// and extends resolution.
   const godotProjectIndexes = hasGodotFiles
-    ? buildGodotProjectIndexes(resolvedPath, fileSet, godotRootCache)
+    ? buildGodotProjectIndexes(resolvedPath, fileSet, godotRootCache, recorder)
     : undefined;
   // Per-project UID indexes: maps each Godot project root to its scoped
   // uid:// → relative path index. Used for uid:// resolution in GDScript
   // and Godot resource files. Godot prefers UIDs over text paths.
   const godotProjectUidIndexes = hasGodotFiles
-    ? buildGodotUidIndexes(resolvedPath, fileSet, godotRootCache)
+    ? buildGodotUidIndexes(resolvedPath, fileSet, godotRootCache, recorder)
     : undefined;
 
   // Symbol resolution needs the same nearest-project boundary as import
@@ -1024,7 +1172,7 @@ export async function buildCodeGraph(
     for (const [godotRoot, classNameIndex] of godotProjectIndexes ?? []) {
       const rootOffset = toForwardSlash(path.relative(resolvedPath, godotRoot));
       const autoloadTable = new Map<string, string>();
-      for (const [name, resourcePath] of parseGodotAutoloads(godotRoot)) {
+      for (const [name, resourcePath] of parseGodotAutoloads(godotRoot, recorder)) {
         const repoPath = rootOffset ? `${rootOffset}/${resourcePath}` : resourcePath;
         autoloadTable.set(name, repoPath);
       }
@@ -1089,15 +1237,15 @@ export async function buildCodeGraph(
   // #120). Consulted only after a PSR-4 miss, so the manifest stays the
   // authority wherever one exists.
   const hasPhp = files.some((f) => path.extname(f).toLowerCase() === ".php");
-  const phpPsr4Map = hasPhp ? buildPhpPsr4Map(resolvedPath) : undefined;
-  const phpFqcnMap = hasPhp ? buildPhpFqcnMap(fileSet, resolvedPath) : undefined;
+  const phpPsr4Map = hasPhp ? buildPhpPsr4Map(resolvedPath, recorder) : undefined;
+  const phpFqcnMap = hasPhp ? buildPhpFqcnMap(fileSet, resolvedPath, recorder) : undefined;
 
   // Build a namespace lookup map for C# projects. Each `namespace X.Y.Z` block
   // (or file-scoped `namespace X.Y.Z;`) is recorded so `using X.Y.Z;` directives
   // can be resolved to the file(s) that contribute to that namespace. Without
   // this, every C# import resolved to null and the file graph was empty.
   const hasCs = files.some((f) => path.extname(f).toLowerCase() === ".cs");
-  const csNamespaceMap = hasCs ? buildCsNamespaceMap(fileSet, resolvedPath) : undefined;
+  const csNamespaceMap = hasCs ? buildCsNamespaceMap(fileSet, resolvedPath, recorder) : undefined;
 
   // Build Go module-resolution info from every go.mod in the tree (issue
   // #45 for a root-level go.mod; issue #82 for nested modules in a
@@ -1108,7 +1256,7 @@ export async function buildCodeGraph(
   // treats an empty/undefined result as "no Go resolution available" and
   // behaves exactly as it did before this feature for those cases.
   const hasGo = files.some((f) => f.endsWith(".go"));
-  const goModuleInfo = hasGo ? buildGoModuleInfo(fileSet, resolvedPath) : undefined;
+  const goModuleInfo = hasGo ? buildGoModuleInfo(fileSet, resolvedPath, recorder) : undefined;
 
   // Map each in-repo Dart package name to its root, from every pubspec.yaml
   // in the tree (discovered by walking, like go.mod — pubspec.yaml is never
@@ -1118,7 +1266,7 @@ export async function buildCodeGraph(
   // (issue #106). An empty/undefined map keeps the resolver's old behavior:
   // every `package:` import stays unresolved.
   const hasDart = files.some((f) => path.extname(f).toLowerCase() === ".dart");
-  const dartPackageMap = hasDart ? buildDartPackageMap(resolvedPath) : undefined;
+  const dartPackageMap = hasDart ? buildDartPackageMap(resolvedPath, recorder) : undefined;
 
   // Record the import roots every pyproject.toml in the tree implies, plus the
   // workspace members each declares (discovered by walking, like go.mod and
@@ -1131,7 +1279,7 @@ export async function buildCodeGraph(
   const hasPython = files.some(
     (f) => getLanguageFromExtension(path.extname(f).toLowerCase()) === "python",
   );
-  const pythonManifests = hasPython ? buildPythonManifests(resolvedPath) : [];
+  const pythonManifests = hasPython ? buildPythonManifests(resolvedPath, recorder) : [];
   // Which roots apply, and in what order, depends on where the importing file
   // sits, so it is resolved per directory rather than once for the project —
   // cached because a package directory typically holds many files.
@@ -1150,7 +1298,7 @@ export async function buildCodeGraph(
   // Elixir module names do not imply paths. Resolve directives against
   // in-project `defmodule` declarations.
   const hasElixir = files.some((f) => [".ex", ".exs"].includes(path.extname(f).toLowerCase()));
-  const elixirModuleMap = hasElixir ? buildElixirModuleMap(fileSet, resolvedPath) : undefined;
+  const elixirModuleMap = hasElixir ? buildElixirModuleMap(fileSet, resolvedPath, recorder) : undefined;
 
   // Record every crate the tree declares, from each Cargo.toml (discovered by
   // walking, like go.mod and pubspec.yaml — Cargo.toml is never in the
@@ -1161,7 +1309,7 @@ export async function buildCodeGraph(
   // only bare `mod` declarations. An empty list keeps `mod`, `super` and `self`
   // resolving from the file's own position, as before.
   const hasRust = files.some((f) => path.extname(f).toLowerCase() === ".rs");
-  const rustCrates = hasRust ? buildRustCrateMap(fileSet, resolvedPath) : undefined;
+  const rustCrates = hasRust ? buildRustCrateMap(fileSet, resolvedPath, recorder) : undefined;
 
   // Which crate each Rust file belongs to, as a path prefix. `crate::` is
   // relative to a crate's own root module, so resolution needs the boundary —
@@ -1238,6 +1386,10 @@ export async function buildCodeGraph(
     }
     if (!lang && !isElixirTemplate && !isGodotResource) {
       const absolutePath = path.join(resolvedPath, relPath);
+      // A leaf node is made from its path alone — nothing here reads it — so
+      // only its presence is recorded. Its content reaching the graph would
+      // mean it had a parser, which is the branch above.
+      recorder.present(absolutePath);
       if (!nodesMap.has(relPath)) {
         nodesMap.set(relPath, {
           filePath: absolutePath,
@@ -1259,9 +1411,13 @@ export async function buildCodeGraph(
       const stat = await fs.stat(absolutePath);
       if (stat.size > MAX_GRAPH_FILE_BYTES) {
         recordSkip(relPath, "oversized", { size: stat.size, limit: MAX_GRAPH_FILE_BYTES });
+        // The size is what excluded it, so the size is what is watched: a file
+        // that shrinks under the limit becomes a node the next build.
+        recorder.present(absolutePath, stat.size);
         continue;
       }
       source = await fs.readFile(absolutePath, "utf-8");
+      recorder.read(absolutePath, source);
     } catch (err) {
       // ENOENT means the file vanished between discovery and this read; anything
       // else is a real fault worth the error text. Both drop the file, so both
@@ -1269,6 +1425,9 @@ export async function buildCodeGraph(
       // of `files` entirely, leaving nothing here to count.
       if ((err as NodeJS.ErrnoException)?.code === "ENOENT") recordSkip(relPath, "vanished");
       else recordSkip(relPath, "read-failed", { error: err instanceof Error ? err.message : String(err) });
+      // Tried and failed, which is not the same as deliberately not opened: a
+      // file that starts being readable starts being a node.
+      recorder.unreadable(absolutePath);
       continue;
     }
 
@@ -1484,7 +1643,7 @@ export async function buildCodeGraph(
     if (godotRoot) {
       const rootOffset = toForwardSlash(path.relative(resolvedPath, godotRoot));
       autoloadTable = new Map();
-      for (const [name, resourcePath] of parseGodotAutoloads(godotRoot)) {
+      for (const [name, resourcePath] of parseGodotAutoloads(godotRoot, recorder)) {
         const repoPath = rootOffset ? `${rootOffset}/${resourcePath}` : resourcePath;
         autoloadTable.set(name, repoPath);
         resToRepoPathMap.set(resourcePath, repoPath);
@@ -1507,5 +1666,6 @@ export async function buildCodeGraph(
     rustCrateRootsByFile,
     rustInlineScopedCalls,
     rustInlineDeclaredSymbols,
+    graphInputs: recorder.finish(effectiveExtras, await currentGraphCapabilities()),
   };
 }

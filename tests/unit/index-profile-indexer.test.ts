@@ -113,6 +113,7 @@ vi.mock("../../src/services/code-graph.js", () => ({
   getAstGrepLang: vi.fn(() => null),
   rebuildGraph: vi.fn(async () => ({ nodes: [], edges: [] })),
   removeGraph: vi.fn(async () => undefined),
+  shouldRebuildGraph: vi.fn(async () => ({ rebuild: true, reason: "mocked", graphExists: true })),
 }));
 
 vi.mock("../../src/services/elixir-templates.js", () => ({
@@ -123,6 +124,10 @@ vi.mock("../../src/services/elixir-templates.js", () => ({
 
 vi.mock("../../src/services/lock.js", () => ({
   acquireProjectLock: vi.fn(async () => true),
+  // Consistent with the acquire above: a run that took the lock still holds it.
+  // Without this the ownership guard on the listing refresh throws rather than
+  // answering, and the refresh silently never happens.
+  holdsProjectLock: vi.fn(() => true),
   releaseProjectLock: vi.fn(async () => undefined),
 }));
 
@@ -539,4 +544,132 @@ describe("code-index effective profile compatibility", () => {
     expect(vi.mocked(rebuildGraph)).toHaveBeenCalledTimes(1);
     expect(vi.mocked(rebuildGraph)).toHaveBeenCalledWith(project, { skipSymbolGraph: false });
   });
+
+  it("does not rebuild the graph when no graph input changed", async () => {
+    // The wiring, not the decision — that is covered against real builds in
+    // graph-input-invalidation.test.ts. What this pins is that a "no" reaches
+    // the gate and stops the rebuild, and that the update still succeeds.
+    const indexer = await loadIndexer();
+    const { legacyIndexProfile } = await import("../../src/services/index-profile.js");
+    const { rebuildGraph, shouldRebuildGraph } = await import("../../src/services/code-graph.js");
+    const project = await createProject("notes.txt", "new changed content");
+    collectionInfo = { pointsCount: 1, status: "green" };
+    storedProfile = legacyIndexProfile("code");
+    storedHashes = new Map([["notes.txt", indexer.hashContent("old source")]]);
+
+    vi.mocked(rebuildGraph).mockClear();
+    vi.mocked(shouldRebuildGraph).mockResolvedValueOnce({
+      rebuild: false,
+      reason: "no graph input changed",
+      graphExists: true,
+    });
+    const result = await indexer.updateProjectIndex(project);
+
+    expect(result.updated).toBe(1);
+    expect(vi.mocked(rebuildGraph)).not.toHaveBeenCalled();
+  });
+
+  it("asks with the change the update actually made", async () => {
+    // A decision taken on the wrong change set is worse than no decision, so
+    // pin what the gate hands over: the new hash for the changed file, the
+    // addition flag, and a hash lookup answering from the updated map.
+    const indexer = await loadIndexer();
+    const { legacyIndexProfile } = await import("../../src/services/index-profile.js");
+    const { shouldRebuildGraph } = await import("../../src/services/code-graph.js");
+    const project = await createProject("notes.txt", "new changed content");
+    collectionInfo = { pointsCount: 1, status: "green" };
+    storedProfile = legacyIndexProfile("code");
+    storedHashes = new Map([["notes.txt", indexer.hashContent("old source")]]);
+
+    vi.mocked(shouldRebuildGraph).mockClear();
+    await indexer.updateProjectIndex(project);
+
+    expect(vi.mocked(shouldRebuildGraph)).toHaveBeenCalledTimes(1);
+    const [askedPath, change] = vi.mocked(shouldRebuildGraph).mock.calls[0];
+    expect(askedPath).toBe(project);
+    expect(change.hasAdditions).toBe(false);
+    expect(change.changed.get("notes.txt")).toBe(indexer.hashContent("new changed content"));
+    expect(change.removed.size).toBe(0);
+    expect(change.unreadable.size).toBe(0);
+    expect(change.knownHash("notes.txt")).toBe(indexer.hashContent("new changed content"));
+  });
+
+  it("rebuilds on a recorded input the index never saw change", async () => {
+    // The counters are all zero — nothing indexable moved — which is exactly
+    // the shape of a commit touching only `go.mod` or `.gitignore`. The record
+    // is what says the graph is now wrong, so the gate has to be reachable.
+    const indexer = await loadIndexer();
+    const { legacyIndexProfile } = await import("../../src/services/index-profile.js");
+    const { rebuildGraph, shouldRebuildGraph } = await import("../../src/services/code-graph.js");
+    const project = await createProject("notes.txt", "unchanged");
+    collectionInfo = { pointsCount: 1, status: "green" };
+    storedProfile = legacyIndexProfile("code");
+    storedHashes = new Map([["notes.txt", indexer.hashContent("unchanged")]]);
+
+    vi.mocked(rebuildGraph).mockClear();
+    vi.mocked(shouldRebuildGraph).mockResolvedValueOnce({
+      rebuild: true,
+      reason: "graph input changed: go.mod",
+      graphExists: true,
+    });
+    const result = await indexer.updateProjectIndex(project);
+
+    expect(result).toMatchObject({ added: 0, updated: 0, removed: 0 });
+    expect(vi.mocked(rebuildGraph)).toHaveBeenCalledTimes(1);
+  });
+
+  it("rebuilds a graph whose record is missing even when nothing was indexed", async () => {
+    // The compatibility rule: a graph with no usable record rebuilds once and
+    // populates it, with no migration and nothing for anyone to run. Gating
+    // that on the index having moved would leave a legacy graph never
+    // populating on a project whose commits happen to touch nothing indexable.
+    const indexer = await loadIndexer();
+    const { legacyIndexProfile } = await import("../../src/services/index-profile.js");
+    const { rebuildGraph, shouldRebuildGraph } = await import("../../src/services/code-graph.js");
+    const project = await createProject("notes.txt", "unchanged");
+    collectionInfo = { pointsCount: 1, status: "green" };
+    storedProfile = legacyIndexProfile("code");
+    storedHashes = new Map([["notes.txt", indexer.hashContent("unchanged")]]);
+
+    for (const reason of [
+      "no usable record of what the graph was built from",
+      "the graph's stored inputs could not be read: connection refused",
+    ]) {
+      vi.mocked(rebuildGraph).mockClear();
+      vi.mocked(shouldRebuildGraph).mockResolvedValueOnce({
+        rebuild: true,
+        reason,
+        graphExists: true,
+      });
+      const result = await indexer.updateProjectIndex(project);
+
+      expect(result).toMatchObject({ added: 0, updated: 0, removed: 0 });
+      expect(vi.mocked(rebuildGraph), reason).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("does not build a graph that does not exist when nothing was indexed", async () => {
+    // The one case that stays suppressed. Rebuilding with nothing persisted is
+    // building a first graph, which an update that indexed nothing should not
+    // decide to do — and which `codebase_index` or an update that changes
+    // something will do anyway.
+    const indexer = await loadIndexer();
+    const { legacyIndexProfile } = await import("../../src/services/index-profile.js");
+    const { rebuildGraph, shouldRebuildGraph } = await import("../../src/services/code-graph.js");
+    const project = await createProject("notes.txt", "unchanged");
+    collectionInfo = { pointsCount: 1, status: "green" };
+    storedProfile = legacyIndexProfile("code");
+    storedHashes = new Map([["notes.txt", indexer.hashContent("unchanged")]]);
+
+    vi.mocked(rebuildGraph).mockClear();
+    vi.mocked(shouldRebuildGraph).mockResolvedValueOnce({
+      rebuild: true,
+      reason: "no code graph has been built yet",
+      graphExists: false,
+    });
+    await indexer.updateProjectIndex(project);
+
+    expect(vi.mocked(rebuildGraph)).not.toHaveBeenCalled();
+  });
+
 });
