@@ -5,6 +5,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   createQdrantFetchBridge,
+  nativeFetchSupportsUndiciDispatcher,
   qdrantFetchMode,
   readInstalledQdrantClientVersion,
 } from "../../src/services/qdrant-client-compat.js";
@@ -84,6 +85,46 @@ describe("qdrant-client-compat", () => {
 
     it("keeps native fetch for a non-finite Node major", () => {
       expect(qdrantFetchMode(Number.NaN, "1.18.0")).toBe("native");
+    });
+  });
+
+  describe("nativeFetchSupportsUndiciDispatcher", () => {
+    it("reports a handler without onError as unsupported", () => {
+      // Mirrors the real failure: Node's built-in fetch hands undici 6's
+      // dispatcher a handler that has no onError, so undici's own recovery
+      // path throws `invalid onError method`.
+      const nativeFetch = vi.fn(async (_input: unknown, init: unknown) => {
+        const { dispatcher } = init as { dispatcher: { dispatch: (o: unknown, h: unknown) => boolean } };
+        dispatcher.dispatch({}, {});
+        return new Response("ok");
+      }) as unknown as typeof globalThis.fetch;
+
+      expect(nativeFetchSupportsUndiciDispatcher(nativeFetch)).toBe(false);
+    });
+
+    it("reports a handler exposing onError as supported", () => {
+      const nativeFetch = vi.fn(async (_input: unknown, init: unknown) => {
+        const { dispatcher } = init as { dispatcher: { dispatch: (o: unknown, h: unknown) => boolean } };
+        dispatcher.dispatch({}, { onError: () => undefined });
+        return new Response("ok");
+      }) as unknown as typeof globalThis.fetch;
+
+      expect(nativeFetchSupportsUndiciDispatcher(nativeFetch)).toBe(true);
+    });
+
+    it("treats a fetch that throws synchronously as unsupported", () => {
+      const nativeFetch = (() => {
+        throw new TypeError("fetch failed");
+      }) as unknown as typeof globalThis.fetch;
+
+      expect(nativeFetchSupportsUndiciDispatcher(nativeFetch)).toBe(false);
+    });
+
+    it("treats a fetch that never reaches the dispatcher as unsupported", () => {
+      // No handler shape was ever observed, so the pair cannot be trusted.
+      const nativeFetch = vi.fn(async () => new Response("ok")) as unknown as typeof globalThis.fetch;
+
+      expect(nativeFetchSupportsUndiciDispatcher(nativeFetch)).toBe(false);
     });
   });
 
