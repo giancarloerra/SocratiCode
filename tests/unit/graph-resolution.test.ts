@@ -4959,5 +4959,66 @@ describe("graph-resolution", () => {
 
       expect(result).toBeNull();
     });
+
+    // ── Kotlin Multiplatform / Gradle source sets ────────────────────────
+
+    it("builds a suffix map for Kotlin Multiplatform source sets", () => {
+      project = createTempProject({
+        [`core${path.sep}shared${path.sep}src${path.sep}commonMain${path.sep}kotlin${path.sep}com${path.sep}example${path.sep}Shared.kt`]: "",
+        [`composeApp${path.sep}src${path.sep}iosMain${path.sep}kotlin${path.sep}com${path.sep}example${path.sep}Ios.kt`]: "",
+        [`core${path.sep}data${path.sep}src${path.sep}androidMain${path.sep}kotlin${path.sep}com${path.sep}example${path.sep}Android.kt`]: "",
+        [`core${path.sep}logic${path.sep}src${path.sep}jvmMain${path.sep}kotlin${path.sep}com${path.sep}example${path.sep}Desktop.kt`]: "",
+      });
+
+      const map = buildJvmSuffixMap(project.fileSet);
+
+      expect(map.has(`com${path.sep}example${path.sep}Shared.kt`)).toBe(true);
+      expect(map.has(`com${path.sep}example${path.sep}Ios.kt`)).toBe(true);
+      expect(map.has(`com${path.sep}example${path.sep}Android.kt`)).toBe(true);
+      expect(map.has(`com${path.sep}example${path.sep}Desktop.kt`)).toBe(true);
+    });
+
+    it("resolves a Kotlin import across KMP source sets via suffix map", () => {
+      const sharedPath =
+        `core${path.sep}shared${path.sep}src${path.sep}commonMain${path.sep}kotlin${path.sep}com${path.sep}example${path.sep}Util.kt`;
+      const iosCallerPath =
+        `composeApp${path.sep}src${path.sep}iosMain${path.sep}kotlin${path.sep}com${path.sep}example${path.sep}App.kt`;
+
+      project = createTempProject({ [sharedPath]: "", [iosCallerPath]: "" });
+
+      const jvmSuffixMap = buildJvmSuffixMap(project.fileSet);
+      const result = resolveImport(
+        "com.example.Util",
+        path.join(project.root, iosCallerPath),
+        project.root,
+        project.fileSet,
+        "kotlin",
+        undefined,
+        jvmSuffixMap,
+      );
+
+      expect(result).toBe(sharedPath);
+    });
+
+    it("resolves a Kotlin import from a single-module KMP layout without a suffix map", () => {
+      const sharedPath =
+        `src${path.sep}commonMain${path.sep}kotlin${path.sep}com${path.sep}example${path.sep}Util.kt`;
+      const callerPath =
+        `src${path.sep}commonMain${path.sep}kotlin${path.sep}com${path.sep}example${path.sep}App.kt`;
+
+      project = createTempProject({ [sharedPath]: "", [callerPath]: "" });
+
+      const result = resolveImport(
+        "com.example.Util",
+        path.join(project.root, callerPath),
+        project.root,
+        project.fileSet,
+        "kotlin",
+        undefined,
+        undefined,
+      );
+
+      expect(result).toBe(sharedPath);
+    });
   });
 });

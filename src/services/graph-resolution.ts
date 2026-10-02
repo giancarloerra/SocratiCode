@@ -32,6 +32,19 @@ import { createIgnoreFilter, shouldIgnore } from "./ignore.js";
  * ordering only settles which, so an unordered caller gets a valid map with an
  * arbitrary winner.
  */
+/**
+ * Whether `seg` names a JVM source-set directory in a `src/<sourceSet>/<lang>`
+ * layout. `main` covers the classic Maven/Gradle convention; the `*Main` forms
+ * cover Kotlin Multiplatform and Gradle source sets (`commonMain`, `androidMain`,
+ * `iosMain`, `jvmMain`, `nativeMain`, `desktopMain`, `macosMain`, `wasmJsMain`, ...).
+ */
+export function isJvmSourceSetDir(seg: string): boolean {
+  if (seg === "main") return true;
+  return /^(common|android|ios|jvm|native|desktop|macos|linux|mingw|watchos|tvos|wasm|js|uikit)[A-Za-z]*Main$/.test(
+    seg,
+  );
+}
+
 export function buildJvmSuffixMap(fileSet: Set<string>): Map<string, string> {
   const map = new Map<string, string>();
   const jvmExts = new Set([".java", ".kt", ".kts", ".scala"]);
@@ -42,17 +55,21 @@ export function buildJvmSuffixMap(fileSet: Set<string>): Map<string, string> {
     // Split on either separator so the logic works on Windows and POSIX.
     const parts = f.split(/[\\/]/);
 
-    // Find the first occurrence of src/main/<lang> boundary.
+    // Find the first occurrence of src/<sourceSet>/<lang> boundary.
+    // Classic JVM: src/main/<lang>. Kotlin Multiplatform / Gradle source sets:
+    // src/commonMain/<lang>, src/androidMain/<lang>, src/iosMain/<lang>,
+    // src/jvmMain/<lang>, src/nativeMain/<lang>, src/desktopMain/<lang>,
+    // src/macosMain/<lang>, and the other KMP target source sets.
     const jvmLangs = new Set(["java", "kotlin", "scala"]);
     const idx = parts.findIndex(
       (p, i) =>
         p === "src" &&
-        parts[i + 1] === "main" &&
+        isJvmSourceSetDir(parts[i + 1]) &&
         jvmLangs.has(parts[i + 2]),
     );
 
     if (idx !== -1) {
-      // classPath = everything after src/main/<lang>, e.g. com/example/Foo.java
+      // classPath = everything after src/<sourceSet>/<lang>, e.g. com/example/Foo.java
       const classPath = parts.slice(idx + 3).join("/");
       // Only register the first match to avoid ambiguity for duplicate class names.
       if (!map.has(classPath)) {
@@ -2815,6 +2832,15 @@ export function resolveImport(
         `src/main/${language}`,  // src/main/java, src/main/kotlin, src/main/scala
         "src/main",
         "src",
+        // Kotlin Multiplatform / Gradle source sets. Without these, every KMP
+        // project resolves zero JVM imports: `src/commonMain/kotlin/...` never
+        // matches `src/main/<lang>` and the suffix map skips the file entirely.
+        `src/commonMain/${language}`,
+        `src/androidMain/${language}`,
+        `src/iosMain/${language}`,
+        `src/jvmMain/${language}`,
+        `src/nativeMain/${language}`,
+        `src/desktopMain/${language}`,
       ];
       for (const dir of jvmSrcDirs) {
         const inSrc = resolveRelativePath(
