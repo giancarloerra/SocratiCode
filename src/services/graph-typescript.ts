@@ -152,7 +152,7 @@ export function createTypeScriptResolver(
   const parsedConfig = (file: string): ts.ParsedCommandLine => {
     let parsed = parsedByConfig.get(file);
     if (!parsed) {
-      parsed = ts.getParsedCommandLineOfConfigFile(file, undefined, configHost);
+      parsed = ts.getParsedCommandLineOfConfigFile(toForwardSlash(file), undefined, configHost);
       if (!parsed) throw new Error(`Cannot read TypeScript configuration: ${file}`);
       // Empty inputs are immaterial to a graph resolver. All actual config
       // diagnostics retain their compiler-provided cause.
