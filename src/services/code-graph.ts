@@ -41,6 +41,7 @@ import {
   type RustUseBinding,
   rawCallsToUnresolvedEdges,
 } from "./graph-symbols.js";
+import { createTypeScriptResolver } from "./graph-typescript.js";
 
 import { createIgnoreFilter } from "./ignore.js";
 import { logger } from "./logger.js";
@@ -1227,6 +1228,8 @@ export async function buildCodeGraph(
   const aliases = await loadPathAliases(resolvedPath, recorder);
   const { files, detectedExts } = await getGraphableFiles(resolvedPath, extraExtensions, recorder);
   const fileSet = new Set(files);
+  const hasJsTs = files.some((file) => ["javascript", "typescript", "svelte", "vue"].includes(getLanguageFromExtension(path.extname(file))));
+  const tsContextFor = hasJsTs ? createTypeScriptResolver(resolvedPath, fileSet, recorder) : undefined;
   if (files.some((file) => isElixirTemplateExtension(path.extname(file)))) {
     await ensureElixirTemplateParsers();
   }
@@ -1644,6 +1647,8 @@ export async function buildCodeGraph(
     // workspace has one — an edge into an unrelated crate. Where the
     // declaration does not move anything, the value is the name itself.
     const declaredMods = new Map<string, string>();
+    const tsContext = ["javascript", "typescript", "svelte", "vue"].includes(language)
+      ? tsContextFor?.(absolutePath) : undefined;
     for (const imp of importInfos) {
       if (imp.declaredName) declaredMods.set(imp.declaredName, imp.moduleSpecifier);
     }
@@ -1690,7 +1695,9 @@ export async function buildCodeGraph(
       // unaffected: there the path is absolute from the crate root and never
       // consulted the map to begin with.
       const scopedMods = imp.fromInlineBlock ? EMPTY_DECLARED_MODS : declaredMods;
-      const resolved = resolveImport(imp.moduleSpecifier, absolutePath, resolvedPath, fileSet, resolutionLanguage, aliases, jvmSuffixMap, csNamespaceMap, goModuleInfo, phpPsr4Map, dartPackageMap, pythonRootsFor(relPath), elixirModuleMap, phpFqcnMap, rustCrates, scopedMods, imp.isModuleDeclaration === true, fileClassNameIndex, fileGodotRoot, fileUidIndex, imp.fallbackSpecifier, imp.godotImportKind);
+      const jsBareImport = tsContext && !imp.isCssImport && !imp.moduleSpecifier.startsWith(".");
+      const resolved = jsBareImport ? tsContext.resolve(imp)
+        : resolveImport(imp.moduleSpecifier, absolutePath, resolvedPath, fileSet, resolutionLanguage, tsContext?.aliases ?? aliases, jvmSuffixMap, csNamespaceMap, goModuleInfo, phpPsr4Map, dartPackageMap, pythonRootsFor(relPath), elixirModuleMap, phpFqcnMap, rustCrates, scopedMods, imp.isModuleDeclaration === true, fileClassNameIndex, fileGodotRoot, fileUidIndex, imp.fallbackSpecifier, imp.godotImportKind);
       if (resolved) {
         node.dependencies.push(resolved);
 

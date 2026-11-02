@@ -53,6 +53,8 @@ jobs:
       - run: npx vitest run tests/unit/git-state.test.ts tests/unit/git-refresh.test.ts tests/unit/git-lock.test.ts tests/unit/local-index-ownership.test.ts
       - name: Verify JVM source-set resolution on Windows
         run: npx vitest run tests/unit/graph-resolution.test.ts -t "JVM multi-module resolution"
+      - name: Verify TS/JS monorepo resolution on Windows
+        run: npx vitest run tests/unit/graph-typescript.test.ts
 
   git-refresh-integration:
     name: Git Refresh with Qdrant and Ollama

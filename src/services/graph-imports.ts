@@ -11,6 +11,8 @@ import { logger } from "./logger.js";
 export interface ImportInfo {
   moduleSpecifier: string; // The raw import string
   isDynamic: boolean;
+  /** CommonJS require uses a different conditional-export branch from import. */
+  isRequire?: boolean;
   isCssImport?: boolean;   // True when extracted from a CSS/style context
   /**
    * Fallback specifier when the primary moduleSpecifier cannot be resolved.
@@ -492,7 +494,8 @@ function extractJsTsImportsFromNode(sgNode: ReturnType<ReturnType<typeof parse>[
     const sourceNode = node.find({ rule: { kind: "string" } });
     if (sourceNode) {
       const spec = sourceNode.text().replace(/['"]/g, "");
-      imports.push({ moduleSpecifier: spec, isDynamic: false });
+      const isRequire = node.children().some((child) => child.kind() === "import_require_clause");
+      imports.push({ moduleSpecifier: spec, isDynamic: false, ...(isRequire ? { isRequire: true } : {}) });
     }
   }
   // require("...")
@@ -500,7 +503,7 @@ function extractJsTsImportsFromNode(sgNode: ReturnType<ReturnType<typeof parse>[
     const text = node.text();
     const match = text.match(/require\s*\(\s*['"]([^'"]+)['"]\s*\)/);
     if (match) {
-      imports.push({ moduleSpecifier: match[1], isDynamic: false });
+      imports.push({ moduleSpecifier: match[1], isDynamic: false, isRequire: true });
     }
   }
   // dynamic import("...")
