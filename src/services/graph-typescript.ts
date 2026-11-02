@@ -58,7 +58,8 @@ export function createTypeScriptResolver(
     if (bindings.has(absolute)) return bindings.get(absolute) ?? null;
     let canonical: string | null = null;
     try {
-      canonical = fs.realpathSync(absolute);
+      // Match the native canonicalization used by the async freshness check.
+      canonical = fs.realpathSync.native(absolute);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ENOENT" && code !== "ENOTDIR") throw error;

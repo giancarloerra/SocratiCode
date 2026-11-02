@@ -829,7 +829,7 @@ describe("graph input invalidation", () => {
     it("accepts records without bindings and roundtrips an optional binding record", async () => {
       expect(record.realpaths).toBeUndefined();
       await expect(decide(JSON.stringify(record))).resolves.toMatchObject({ rebuild: false });
-      const withBinding = { ...record, realpaths: { ".": hashContent(fs.realpathSync(fixture.root).split(path.sep).join("/")) } };
+      const withBinding = { ...record, realpaths: { ".": hashContent(fs.realpathSync.native(fixture.root).split(path.sep).join("/")) } };
       await expect(decide(JSON.stringify(withBinding))).resolves.toMatchObject({ rebuild: false });
       await expect(decide({ ...record, realpaths: { ".": null } })).resolves.toMatchObject({ rebuild: true });
     });

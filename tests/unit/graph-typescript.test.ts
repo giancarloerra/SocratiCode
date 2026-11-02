@@ -268,7 +268,7 @@ describe("TS/JS monorepo graph resolution", () => {
       expect((await decide(graph.graphInputs)).rebuild).toBe(true);
       graph = await buildCodeGraph(root);
       expect(dependencies(graph, "apps/crm/main.ts")).toEqual(member ? ["packages/db/index.ts"] : []);
-      expect((await decide(graph.graphInputs)).rebuild).toBe(false);
+      expect(await decide(graph.graphInputs)).toMatchObject({ rebuild: false });
       fs.unlinkSync(link);
     }
     expect((await decide(graph.graphInputs)).rebuild).toBe(true);
@@ -284,8 +284,8 @@ describe("TS/JS monorepo graph resolution", () => {
     fs.mkdirSync(path.dirname(link), { recursive: true });
     fs.symlinkSync(path.join(root, "packages/db"), link, "junction");
     const failure = Object.assign(new Error("EACCES: installed binding cannot be inspected"), { code: "EACCES", path: link });
-    const original = fs.realpathSync;
-    vi.spyOn(fs, "realpathSync").mockImplementation((...args) => {
+    const original = fs.realpathSync.native;
+    vi.spyOn(fs.realpathSync, "native").mockImplementation((...args) => {
       if (path.resolve(String(args[0])) === link) throw failure;
       return Reflect.apply(original, fs, args);
     });
