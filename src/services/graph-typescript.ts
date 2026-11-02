@@ -158,10 +158,11 @@ export function createTypeScriptResolver(
       // diagnostics retain their compiler-provided cause.
       // The original alias loader ignored compiler options it did not use.
       // Keep known paths usable when a project uses another compiler version's
-      // options (5023/5025) or emit/type-library values. Syntax, inheritance and
-      // invalid resolution-option values still fail.
+      // options (5023/5025) or emit/type-library values. Missing extends bases
+      // (6053/5083) also retain local aliases, as the original loader did.
+      // Syntax, circular inheritance and invalid resolution values still fail.
       const error = parsed.errors.find((diagnostic) =>
-        ![18003, 18002, 5023, 5025].includes(diagnostic.code) && !isCompilerOnlyDiagnostic(diagnostic));
+        ![18003, 18002, 5023, 5025, 6053, 5083].includes(diagnostic.code) && !isCompilerOnlyDiagnostic(diagnostic));
       if (error) throw new Error(`Invalid TypeScript configuration ${file}: ${ts.flattenDiagnosticMessageText(error.messageText, "\n")}`);
       parsedByConfig.set(file, parsed);
     }
@@ -201,12 +202,14 @@ export function createTypeScriptResolver(
     const virtualRoot = workspace && path.join(workspace.root, "node_modules");
     const translate = (file: string): string => {
       const absolute = path.resolve(file);
-      if (!virtualRoot || !inside(virtualRoot, absolute)) return absolute;
-      const rest = toForwardSlash(path.relative(virtualRoot, absolute));
-      const parts = rest.split("/");
-      const name = parts[0].startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
-      const member = workspace.packages.get(name);
-      return member ? path.join(member, ...parts.slice(name.startsWith("@") ? 2 : 1)) : absolute;
+      if (!workspace || !inside(workspace.root, absolute)) return absolute;
+      const parts = toForwardSlash(path.relative(workspace.root, absolute)).split("/");
+      const at = parts.lastIndexOf("node_modules");
+      if (at < 0) return absolute;
+      const rest = parts.slice(at + 1);
+      const length = rest[0]?.startsWith("@") ? 2 : 1;
+      const member = workspace.packages.get(rest.slice(0, length).join("/"));
+      return member ? path.join(member, ...rest.slice(length)) : absolute;
     };
     const host: ts.ModuleResolutionHost = {
       fileExists: (file) => configHost.fileExists(translate(file)),

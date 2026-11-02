@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { EXTRA_EXTENSIONS } from "../../src/constants.js";
 import { buildCodeGraph, currentGraphCapabilities } from "../../src/services/code-graph.js";
 import { decideGraphRebuild, type GraphInputRecord } from "../../src/services/graph-inputs.js";
@@ -26,6 +26,7 @@ describe("TS/JS monorepo graph resolution", () => {
   }, EXTRA_EXTENSIONS, await currentGraphCapabilities());
 
   afterEach(() => {
+    vi.restoreAllMocks();
     if (root) fs.rmSync(root, { recursive: true, force: true });
   });
 
@@ -202,6 +203,72 @@ describe("TS/JS monorepo graph resolution", () => {
     expect(dependencies(graph, "apps/crm/main.ts")).toEqual(["packages/db/two.ts"]);
     write("apps/crm/tsconfig.json", { compilerOptions: { paths: { "@/*": ["one/*"] } } });
     expect((await decide(graph.graphInputs)).rebuild).toBe(true);
+  });
+
+  it.each(["@ws/db", "db"])("preserves installed package-local workspace links for %s", async (name) => {
+    project({
+      "package.json": { workspaces: ["apps/*", "packages/*"] },
+      "tsconfig.json": { compilerOptions: { moduleResolution: "bundler", module: "preserve" } },
+      "apps/crm/package.json": { name: "crm", dependencies: { [name]: "workspace:*" } },
+      "apps/crm/main.ts": `import "${name}";`,
+      "packages/db/package.json": { name, exports: "./src/index.ts" },
+      "packages/db/src/index.ts": "export {};",
+    });
+    const expected = ["packages/db/src/index.ts"];
+    expect(dependencies(await buildCodeGraph(root), "apps/crm/main.ts")).toEqual(expected);
+    const link = path.join(root, "apps/crm/node_modules", name);
+    fs.mkdirSync(path.dirname(link), { recursive: true });
+    fs.symlinkSync(path.join(root, "packages/db"), link, "junction");
+    expect(dependencies(await buildCodeGraph(root), "apps/crm/main.ts")).toEqual(expected);
+  });
+
+  it("preserves implicit Classic resolution for an explicit ESNext module setting", async () => {
+    project({
+      "package.json": { workspaces: ["packages/*"] },
+      "tsconfig.json": { compilerOptions: { module: "esnext" } },
+      "main.ts": 'import "db";',
+      "packages/db/package.json": { name: "db", exports: "./src/index.ts" },
+      "packages/db/src/index.ts": "export {};",
+    });
+    expect(dependencies(await buildCodeGraph(root), "main.ts")).toEqual([]);
+    write("tsconfig.json", { compilerOptions: { module: "esnext", moduleResolution: "bundler" } });
+    expect(dependencies(await buildCodeGraph(root), "main.ts")).toEqual(["packages/db/src/index.ts"]);
+  });
+
+  it.each(["./missing-base.json", "@missing/config"])("preserves local aliases when the extends base %s is absent", async (base) => {
+    project({
+      "tsconfig.json": { extends: base, compilerOptions: { paths: { "@/*": ["src/*"] } } },
+      "main.ts": 'import "@/util";', "src/util.ts": "export {};", "alternate/src/util.ts": "export {};",
+    });
+    const graph = await buildCodeGraph(root);
+    expect(dependencies(graph, "main.ts")).toEqual(["src/util.ts"]);
+    expect((await decide(graph.graphInputs)).rebuild).toBe(false);
+    if (base.startsWith(".")) {
+      write("missing-base.json", { compilerOptions: { baseUrl: "./alternate" } });
+    } else {
+      write("node_modules/@missing/config/package.json", { name: "@missing/config", tsconfig: "tsconfig.json" });
+      write("node_modules/@missing/config/tsconfig.json", { compilerOptions: { baseUrl: "../../../alternate" } });
+    }
+    expect((await decide(graph.graphInputs)).rebuild).toBe(true);
+    const updated = await buildCodeGraph(root);
+    expect(dependencies(updated, "main.ts")).toEqual(["alternate/src/util.ts"]);
+    expect((await decide(updated.graphInputs)).rebuild).toBe(false);
+  });
+
+  it("reports the original cause when an existing config base cannot be read", async () => {
+    project({
+      "tsconfig.json": { extends: "./base.jsonc", compilerOptions: { paths: { "@/*": ["src/*"] } } },
+      "base.jsonc": {}, "main.ts": 'import "@/util";', "src/util.ts": "export {};",
+    });
+    expect(dependencies(await buildCodeGraph(root), "main.ts")).toEqual(["src/util.ts"]);
+    const base = path.join(root, "base.jsonc");
+    const failure = Object.assign(new Error("EACCES: config base cannot be read"), { code: "EACCES", path: base });
+    const original = fs.readFileSync;
+    vi.spyOn(fs, "readFileSync").mockImplementation((...args) => {
+      if (path.resolve(String(args[0])) === base) throw failure;
+      return Reflect.apply(original, fs, args);
+    });
+    await expect(buildCodeGraph(root)).rejects.toThrow(/EACCES: config base cannot be read/);
   });
 
   it("reports invalid/circular configuration and recovers after correction", async () => {
