@@ -52,6 +52,21 @@ export function createTypeScriptResolver(
 ): (sourceFile: string) => ImportContext {
   const root = path.resolve(projectPath);
   const reads = new Map<string, string | undefined>();
+  const bindings = new Map<string, string | null>();
+  const realpath = (file: string): string | null => {
+    const absolute = path.resolve(file);
+    if (bindings.has(absolute)) return bindings.get(absolute) ?? null;
+    let canonical: string | null = null;
+    try {
+      canonical = fs.realpathSync(absolute);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
+    }
+    recorder.realpath?.(absolute, canonical);
+    bindings.set(absolute, canonical);
+    return canonical;
+  };
   const read = (file: string): string | undefined => {
     const absolute = path.resolve(file);
     if (reads.has(absolute)) return reads.get(absolute);
@@ -209,12 +224,23 @@ export function createTypeScriptResolver(
       const rest = parts.slice(at + 1);
       const length = rest[0]?.startsWith("@") ? 2 : 1;
       const member = workspace.packages.get(rest.slice(0, length).join("/"));
-      return member ? path.join(member, ...rest.slice(length)) : absolute;
+      if (!member) return absolute;
+      const entry = path.join(workspace.root, ...parts.slice(0, at + 1 + length));
+      const installed = realpath(entry);
+      // An existing package may be an independent version or npm alias. Only
+      // actual workspace links and absent (virtual) entries map to a member.
+      if (installed !== null && installed !== realpath(member)) return absolute;
+      return path.join(member, ...rest.slice(length));
     };
     const host: ts.ModuleResolutionHost = {
       fileExists: (file) => configHost.fileExists(translate(file)),
       readFile: (file) => read(translate(file)),
       directoryExists: (dir) => {
+        const absolute = path.resolve(dir);
+        if (workspace && inside(workspace.root, absolute) && (
+          path.basename(absolute) === "node_modules"
+          || (path.basename(path.dirname(absolute)) === "node_modules" && path.basename(absolute).startsWith("@"))
+        )) realpath(absolute);
         if (virtualRoot && path.resolve(dir) === virtualRoot) return true;
         if (virtualRoot && path.dirname(path.resolve(dir)) === virtualRoot && path.basename(dir).startsWith("@")) {
           const scope = `${path.basename(dir)}/`;

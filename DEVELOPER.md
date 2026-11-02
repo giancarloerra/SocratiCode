@@ -553,6 +553,7 @@ When `codebase_graph_build` is called:
    ├── Discover declared npm/Yarn and pnpm workspace members
    │   ├── Read manifests at ancestors of graphable files, including ignored-by-index JSON/YAML
    │   ├── Supply workspace package links through a read-only compiler resolution host
+   │   ├── Preserve independently installed packages; track native binding targets for graph invalidation
    │   ├── Apply compiler module-resolution rules, conditional exports and export encapsulation
    │   └── Return targets only from the discovered graph file set
    ├── For each import, resolve module specifier to actual file path

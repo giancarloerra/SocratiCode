@@ -205,7 +205,10 @@ describe("TS/JS monorepo graph resolution", () => {
     expect((await decide(graph.graphInputs)).rebuild).toBe(true);
   });
 
-  it.each(["@ws/db", "db"])("preserves installed package-local workspace links for %s", async (name) => {
+  it.each([
+    "node_modules/@ws/db", "node_modules/db", "apps/crm/node_modules/@ws/db", "apps/crm/node_modules/db",
+  ])("preserves installed workspace links at %s", async (location) => {
+    const name = location.split("node_modules/")[1];
     project({
       "package.json": { workspaces: ["apps/*", "packages/*"] },
       "tsconfig.json": { compilerOptions: { moduleResolution: "bundler", module: "preserve" } },
@@ -216,10 +219,77 @@ describe("TS/JS monorepo graph resolution", () => {
     });
     const expected = ["packages/db/src/index.ts"];
     expect(dependencies(await buildCodeGraph(root), "apps/crm/main.ts")).toEqual(expected);
-    const link = path.join(root, "apps/crm/node_modules", name);
+    const link = path.join(root, location);
     fs.mkdirSync(path.dirname(link), { recursive: true });
     fs.symlinkSync(path.join(root, "packages/db"), link, "junction");
     expect(dependencies(await buildCodeGraph(root), "apps/crm/main.ts")).toEqual(expected);
+  });
+
+  it.each([
+    "node_modules/@ws/db", "node_modules/db", "apps/crm/node_modules/@ws/db", "apps/crm/node_modules/db",
+  ])("keeps an independently installed package external at %s", async (location) => {
+    const name = location.split("node_modules/")[1];
+    project({
+      "package.json": { workspaces: ["apps/*", "packages/*"] },
+      "tsconfig.json": { compilerOptions: { moduleResolution: "bundler", module: "preserve" } },
+      "apps/crm/package.json": { name: "crm", dependencies: { [name]: "npm:external-db@2.0.0" } },
+      "apps/crm/main.ts": `import "${name}";`,
+      "packages/db/package.json": { name, exports: "./index.ts" },
+      "packages/db/index.ts": "export {};",
+      [`${location}/package.json`]: { name: "external-db", exports: "./index.ts" },
+      [`${location}/index.ts`]: "export {};",
+      "node_modules/.installed/db/package.json": { name: "external-db", exports: "./index.ts" },
+      "node_modules/.installed/db/index.ts": "export {};",
+    });
+    expect(dependencies(await buildCodeGraph(root), "apps/crm/main.ts")).toEqual([]);
+    const link = path.join(root, location);
+    fs.rmSync(link, { recursive: true });
+    fs.symlinkSync(path.join(root, "node_modules/.installed/db"), link, "junction");
+    expect(dependencies(await buildCodeGraph(root), "apps/crm/main.ts")).toEqual([]);
+  });
+
+  it.each(["@ws/db", "db"])("invalidates installed binding changes with identical manifests for %s", async (name) => {
+    const manifest = { name, exports: "./index.ts" };
+    project({
+      "package.json": { workspaces: ["apps/*", "packages/*"] },
+      "tsconfig.json": { compilerOptions: { moduleResolution: "bundler", module: "preserve" } },
+      "apps/crm/main.ts": `import "${name}";`,
+      "packages/db/package.json": manifest, "packages/db/index.ts": "export {};",
+    });
+    let graph = await buildCodeGraph(root);
+    expect(dependencies(graph, "apps/crm/main.ts")).toEqual(["packages/db/index.ts"]);
+    expect((await decide(graph.graphInputs)).rebuild).toBe(false);
+    write("node_modules/.installed/db/package.json", manifest);
+    write("node_modules/.installed/db/index.ts", "export {};");
+    const link = path.join(root, "apps/crm/node_modules", name);
+    fs.mkdirSync(path.dirname(link), { recursive: true });
+    for (const member of [false, true, false]) {
+      fs.symlinkSync(path.join(root, member ? "packages/db" : "node_modules/.installed/db"), link, "junction");
+      expect((await decide(graph.graphInputs)).rebuild).toBe(true);
+      graph = await buildCodeGraph(root);
+      expect(dependencies(graph, "apps/crm/main.ts")).toEqual(member ? ["packages/db/index.ts"] : []);
+      expect((await decide(graph.graphInputs)).rebuild).toBe(false);
+      fs.unlinkSync(link);
+    }
+    expect((await decide(graph.graphInputs)).rebuild).toBe(true);
+    expect(dependencies(await buildCodeGraph(root), "apps/crm/main.ts")).toEqual(["packages/db/index.ts"]);
+  });
+
+  it("preserves the underlying error when an installed binding cannot be inspected", async () => {
+    project({
+      "package.json": { workspaces: ["packages/*"] }, "main.ts": 'import "db";',
+      "packages/db/package.json": { name: "db", main: "index.ts" }, "packages/db/index.ts": "export {};",
+    });
+    const link = path.join(root, "node_modules/db");
+    fs.mkdirSync(path.dirname(link), { recursive: true });
+    fs.symlinkSync(path.join(root, "packages/db"), link, "junction");
+    const failure = Object.assign(new Error("EACCES: installed binding cannot be inspected"), { code: "EACCES", path: link });
+    const original = fs.realpathSync;
+    vi.spyOn(fs, "realpathSync").mockImplementation((...args) => {
+      if (path.resolve(String(args[0])) === link) throw failure;
+      return Reflect.apply(original, fs, args);
+    });
+    await expect(buildCodeGraph(root)).rejects.toThrow(/EACCES: installed binding cannot be inspected/);
   });
 
   it("preserves implicit Classic resolution for an explicit ESNext module setting", async () => {
