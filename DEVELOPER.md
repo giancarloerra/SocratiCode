@@ -203,6 +203,7 @@ src/
 │   ├── code-graph.ts        # AST-based code graph building via ast-grep
 │   ├── graph-analysis.ts    # Graph queries: dependencies, stats, cycles, Mermaid diagrams
 │   ├── graph-aliases.ts     # Path alias resolution from tsconfig/jsconfig compilerOptions.paths
+│   ├── graph-typescript.ts  # Importer-specific TS/JS config and declared workspace resolution
 │   ├── graph-imports.ts     # Import/require/use extraction for 19+ languages via AST
 │   ├── graph-resolution.ts  # Module specifier → file path resolution (incl. aliases, SCSS partials)
 │   ├── graph-symbols.ts     # Per-language symbol & call-site extraction (Impact Analysis)
@@ -545,10 +546,15 @@ When `codebase_graph_build` is called:
    └── Return ImportInfo[] with module specifiers
 
 4. RESOLVE IMPORTS
-   ├── Load path aliases from tsconfig.json/jsconfig.json (once per build)
-   │   ├── Parse compilerOptions.paths + baseUrl
-   │   ├── Follow "extends" chains (up to 10 levels, circular-safe)
-   │   └── Fall back to jsconfig.json if tsconfig has no paths
+   ├── Cache TS/JS config lookup by importer directory within the indexed root
+   │   ├── TypeScript parses relative/package/array extends and origin-relative paths/baseUrl
+   │   ├── Preserve root jsconfig aliases when root tsconfig has no paths
+   │   └── Record config reads and missing probes through GraphInputRecorder
+   ├── Discover declared npm/Yarn and pnpm workspace members
+   │   ├── Read manifests at ancestors of graphable files, including ignored-by-index JSON/YAML
+   │   ├── Supply workspace package links through a read-only compiler resolution host
+   │   ├── Apply compiler module-resolution rules, conditional exports and export encapsulation
+   │   └── Return targets only from the discovered graph file set
    ├── For each import, resolve module specifier to actual file path
    ├── Handle relative paths: ./foo → foo.ts, foo/index.ts, etc.
    ├── Try path alias resolution: $lib/foo → src/lib/foo.ts, @/bar → src/bar.ts
@@ -1044,6 +1050,17 @@ Supports 19+ languages including TypeScript, JavaScript, Python, Java, Kotlin, G
 **GDScript (Godot) support is conditional**: the `tree-sitter-gdscript` native addon is an optional dependency resolved via `node-gyp-build`. A preflight check in an isolated child process (`gdscript-preflight.cjs`) validates the addon's N-API compatibility, ast-grep registration symbol, and parse capability before registration. When the preflight passes, AST-based extraction avoids false matches in comments and strings. When it fails, a lightweight lexer provides syntax-aware preload/load/extends extraction and line-based chunking without treating comments or strings as code. Relative `extends` and `preload` paths resolve from the script directory; relative runtime `load` paths resolve from the Godot project root. Godot resource files (`.tscn`/`.tres`) use a tokenizer-based extractor that handles arbitrary whitespace, attribute order, and `uid://` paths. See the [TSCN file format docs](https://docs.godotengine.org/en/stable/engine_details/file_formats/tscn.html) for the resource format specification.
 
 ### graph-resolution.ts
+
+`graph-typescript.ts::createTypeScriptResolver(projectPath, fileSet, recorder)` supplies
+per-importer contexts for JS/TS/Svelte/Vue bare imports. Configs and manifest bytes
+are cached for one build only. The TypeScript runtime dependency supplies config
+inheritance and module resolution; `yaml` parses pnpm declarations. The host maps
+declared workspace packages to their actual source directories without creating
+`node_modules`, running package scripts, or installing workspace dependencies.
+Unknown packages and targets outside `fileSet` do not produce edges. Relative
+imports and component/style aliases retain the existing file resolver. Existing
+graph-input records track config and manifest changes; the ordinary version-based
+graph rebuild after an upgrade refreshes edges without an embedding reset.
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
