@@ -43,16 +43,21 @@ async function getInfraStatusSummary(): Promise<string[]> {
         return lines;
       }
       const qdrant = await isQdrantRunning();
-      const provider = await getEmbeddingProvider();
-      const health = await provider.healthCheck();
-      if (qdrant && health.available) {
-        lines.push(`Infrastructure: ✅ All services running (Docker, Qdrant, ${config.embeddingProvider} embeddings)`);
-      } else {
-        const missing: string[] = [];
-        if (!qdrant) missing.push("Qdrant");
-        if (!health.available) missing.push(`${config.embeddingProvider} embeddings`);
-        lines.push(`Infrastructure: ⚠️ Docker OK, but ${missing.join(" and ")} not running`);
-        lines.push("  Run codebase_index or codebase_health to auto-start services.");
+      try {
+        const provider = await getEmbeddingProvider();
+        const health = await provider.healthCheck();
+        if (qdrant && health.available) {
+          lines.push(`Infrastructure: ✅ All services running (Docker, Qdrant, ${config.embeddingProvider} embeddings)`);
+        } else {
+          const missing: string[] = [];
+          if (!qdrant) missing.push("Qdrant");
+          if (!health.available) missing.push(`${config.embeddingProvider} embeddings`);
+          lines.push(`Infrastructure: ⚠️ Docker OK, but ${missing.join(" and ")} not running`);
+          lines.push("  Run codebase_index or codebase_health to auto-start services.");
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        lines.push(`Infrastructure: ❌ Docker OK, Qdrant ${qdrant ? "running" : "not running"}; ${config.embeddingProvider} provider check failed: ${message}`);
       }
     }
   } catch {

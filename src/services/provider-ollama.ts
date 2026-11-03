@@ -51,6 +51,7 @@ function assertOllamaTransport(host: string, apiKey: string | undefined): void {
   }
 }
 
+/** Reuse a bounded client only while its endpoint, connection limit and credential match. */
 function getClient(): Ollama {
   const config = getEmbeddingConfig();
   if (

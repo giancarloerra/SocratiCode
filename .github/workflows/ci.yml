@@ -39,6 +39,65 @@ jobs:
       - run: npm ci
       - run: npm run test:unit
 
+  platform-compatibility:
+    name: Platform Compatibility
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-15-intel]
+        # Server compatibility includes runtimes outside the development tools'
+        # declared engine range. Keep every supported server major covered.
+        node-version: ["18.17.0", "18", "19", "20", "21", "22", "23", "24", "25", "26"]
+        exclude:
+          # These Linux cells already run in the required unit-tests job.
+          - os: ubuntu-latest
+            node-version: "18"
+          - os: ubuntu-latest
+            node-version: "20"
+          - os: ubuntu-latest
+            node-version: "22"
+          - os: ubuntu-latest
+            node-version: "26"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run test:unit
+
+  platform-consumer-install:
+    name: Platform Node 18.17 Consumer Install
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 18.17.0
+          cache: npm
+      - run: npm ci
+      - name: Verify production installation at the Node floor
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build
+          consumer_dir="$(mktemp -d)"
+          npm pack --pack-destination "$consumer_dir"
+          package_file="$(find "$consumer_dir" -maxdepth 1 -type f -name 'socraticode-*.tgz' -print -quit)"
+          test -n "$package_file"
+          cd "$consumer_dir"
+          npm init --yes
+          npm install --engine-strict --omit=dev "$package_file"
+          test -f node_modules/socraticode/dist/index.js
+          SOCRATICODE_AUTO_RESUME=off SOCRATICODE_AUTO_CLEANUP=off \
+            node node_modules/socraticode/dist/index.js < /dev/null
+
   git-refresh-windows:
     name: Git Refresh on Windows
     runs-on: windows-latest
