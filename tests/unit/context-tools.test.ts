@@ -3,6 +3,7 @@
 
 /** Unit tests for context-tool routing and result formatting. */
 
+import path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // ── Mocks ────────────────────────────────────────────────────────────────
@@ -71,7 +72,7 @@ import { handleContextTool } from "../../src/tools/context-tools.js";
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
-const TEST_PATH = "/tmp/test-project";
+const TEST_PATH = path.resolve("/tmp/test-project");
 
 describe("context indexing and search ownership", () => {
   beforeEach(() => {

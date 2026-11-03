@@ -22,7 +22,7 @@ describe("parsePathAliases", () => {
 
     const aliases = parsePathAliases(json, projectPath);
 
-    expect(aliases.entries.get("$lib/")).toEqual(["src/lib"]);
+    expect(aliases.entries.get("$lib/")).toEqual([path.join("src", "lib")]);
     expect(aliases.entries.get("@/")).toEqual(["src"]);
   });
 
@@ -81,7 +81,7 @@ describe("parsePathAliases", () => {
 
     const aliases = parsePathAliases(json, projectPath);
 
-    expect(aliases.entries.get("$lib/")).toEqual(["src/lib"]);
+    expect(aliases.entries.get("$lib/")).toEqual([path.join("src", "lib")]);
   });
 
   it("handles JSON with multi-line comments", () => {
@@ -147,7 +147,7 @@ describe("parsePathAliases", () => {
     const aliases = parsePathAliases(json, projectPath);
 
     expect(aliases.entries.has("@/")).toBe(false);
-    expect(aliases.entries.get("$lib/")).toEqual(["src/lib"]);
+    expect(aliases.entries.get("$lib/")).toEqual([path.join("src", "lib")]);
   });
 
   it("skips non-string targets gracefully", () => {
@@ -185,7 +185,7 @@ describe("loadPathAliases", () => {
 
     const aliases = await loadPathAliases(tmpDir);
 
-    expect(aliases.entries.get("$lib/")).toEqual(["src/lib"]);
+    expect(aliases.entries.get("$lib/")).toEqual([path.join("src", "lib")]);
   });
 
   it("falls back to jsconfig.json when tsconfig.json is absent", async () => {
@@ -251,7 +251,7 @@ describe("loadPathAliases", () => {
 
     const aliases = await loadPathAliases(tmpDir);
 
-    expect(aliases.entries.get("$lib/")).toEqual(["src/lib"]);
+    expect(aliases.entries.get("$lib/")).toEqual([path.join("src", "lib")]);
   });
 
   it("follows multi-level extends chain", async () => {
@@ -287,7 +287,7 @@ describe("loadPathAliases", () => {
 
     const aliases = await loadPathAliases(tmpDir);
 
-    expect(aliases.entries.get("$lib/")).toEqual(["src/lib"]);
+    expect(aliases.entries.get("$lib/")).toEqual([path.join("src", "lib")]);
   });
 
   it("handles circular extends gracefully", async () => {

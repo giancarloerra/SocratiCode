@@ -541,7 +541,7 @@ describe("indexer utilities", () => {
 
     it("indexes detected extensionless scripts, skips non-code and binary", async () => {
       const files = await getIndexableFiles(root);
-      expect(files).toContain("bin/strato-check-x");
+      expect(files).toContain(path.join("bin", "strato-check-x"));
       expect(files).toContain("wscript");
       expect(files).toContain("app.ts");
       expect(files).not.toContain("LICENSE");

@@ -6,6 +6,7 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
+import { MAX_CHUNK_CHARS } from "../../src/constants.js";
 import { buildCodeGraph, ensureDynamicLanguages, gdscriptParserAvailable, getDynamicLanguageStatus } from "../../src/services/code-graph.js";
 import { decodeGdscriptString, extractGdscriptImportsRegex, extractGodotResourceImports, extractImports, parseTscnSectionHeader } from "../../src/services/graph-imports.js";
 import {
@@ -1185,17 +1186,28 @@ func setup():
         "extends Node",
         "",
         "func first():",
-        ...Array.from({ length: 57 }, (_, index) => `    var first_${index} = ${index}`),
+        ...Array.from({ length: 57 }, (_, index) => `    var a${index} = ${index}`),
         "",
         "func second():",
-        ...Array.from({ length: 57 }, (_, index) => `    var second_${index} = ${index}`),
+        ...Array.from({ length: 57 }, (_, index) => `    var b${index} = ${index}`),
       ];
+      // Keep this line/AST-boundary fixture below the independently enforced
+      // character cap so that cap splitting cannot change these expectations.
+      expect(lines.slice(0, 100).join("\n").length).toBeLessThanOrEqual(MAX_CHUNK_CHARS);
       const chunks = chunkFileContent("/tmp/main.gd", "main.gd", lines.join("\n"));
 
       expect(chunks.every((chunk) => chunk.language === "gdscript")).toBe(true);
       expect(chunks.map((chunk) => chunk.startLine)).toEqual(
         gdscriptParserAvailable ? [1, 2, 61] : [1, 91],
       );
+      const available = gdscriptParserAvailable;
+      try {
+        setGdscriptParserAvailable(false);
+        const fallback = chunkFileContent("/tmp/main.gd", "main.gd", lines.join("\n"));
+        expect(fallback.map((chunk) => chunk.startLine)).toEqual([1, 91]);
+      } finally {
+        setGdscriptParserAvailable(available);
+      }
     });
 
     it.skipIf(!gdscriptParserAvailable)("AST-based import extraction works when parser is available", () => {
@@ -1337,9 +1349,7 @@ func setup():
 
     /** Copy node-gyp-build into a fake package to exercise package-local resolution. */
     function installNodeGypBuild(fakeRoot: string): void {
-      const gdscriptPackage = require.resolve("tree-sitter-gdscript/package.json");
-      const gdscriptRequire = createRequire(gdscriptPackage);
-      const sourceRoot = path.dirname(gdscriptRequire.resolve("node-gyp-build/package.json"));
+      const sourceRoot = path.dirname(require.resolve("node-gyp-build/package.json"));
       const targetRoot = path.join(fakeRoot, "node_modules", "node-gyp-build");
       fs.mkdirSync(path.dirname(targetRoot), { recursive: true });
       fs.cpSync(sourceRoot, targetRoot, { recursive: true });

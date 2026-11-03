@@ -110,6 +110,7 @@
     "@types/node": "^26.6.6",
     "@types/proper-lockfile": "^4.1.4",
     "@vitest/coverage-v8": "^4.1.12",
+    "node-gyp-build": "4.8.4",
     "release-it": "^21.1.2",
     "tsx": "^4.23.15",
     "vitest": "^4.1.12"

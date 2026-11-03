@@ -10,6 +10,7 @@
  * All external services are mocked — no Docker required.
  */
 
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // ── Mocks ────────────────────────────────────────────────────────────────
@@ -222,7 +223,7 @@ import { handleIndexTool } from "../../src/tools/index-tools.js";
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
-const TEST_PATH = "/tmp/test-project";
+const TEST_PATH = path.resolve("/tmp/test-project");
 
 function reclamationEntry(overrides: Record<string, unknown> = {}) {
   return {
