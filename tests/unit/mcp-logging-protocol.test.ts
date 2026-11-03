@@ -30,6 +30,7 @@ interface RpcMessage {
 const UNREACHABLE = "http://127.0.0.1:9";
 
 let child: ChildProcessWithoutNullStreams | undefined;
+let childClosed: Promise<void> | undefined;
 let workDir = "";
 
 beforeEach(async () => {
@@ -37,8 +38,15 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  child?.kill("SIGKILL");
+  const proc = child;
+  if (proc && proc.exitCode === null && proc.signalCode === null) {
+    // EOF reaches the server through the tsx wrapper; wait for its streams
+    // to close before removing a directory the server can still log into.
+    proc.stdin.end();
+  }
+  await childClosed;
   child = undefined;
+  childClosed = undefined;
   await fsp.rm(workDir, { recursive: true, force: true });
 });
 
@@ -65,6 +73,7 @@ function startServer(logFile: string) {
     stdio: ["pipe", "pipe", "pipe"],
   });
   child = proc;
+  childClosed = new Promise<void>((resolve) => proc.once("close", () => resolve()));
 
   const received: RpcMessage[] = [];
   let stderr = "";
