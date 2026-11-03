@@ -61,6 +61,8 @@ jobs:
             node-version: "26"
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node-version }}
@@ -77,6 +79,8 @@ jobs:
         os: [windows-latest, macos-15-intel]
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 18.17.0
@@ -128,6 +132,8 @@ jobs:
       REQUIRE_QDRANT: "1"
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v7
         with:
           node-version: 22
