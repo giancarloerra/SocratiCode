@@ -39,9 +39,32 @@ beforeEach(async () => {
   workDir = await fsp.mkdtemp(path.join(os.tmpdir(), "socraticode-logging-protocol-"));
 });
 
+interface WindowsProcess {
+  ProcessId: number;
+  ParentProcessId: number;
+  CreationDate: string;
+}
+
+/** Read identities so an exited process's reused PID is not a cleanup target. */
+async function windowsProcesses(): Promise<WindowsProcess[]> {
+  const { stdout } = await execFileAsync("powershell.exe", [
+    "-NoProfile", "-NonInteractive", "-Command",
+    "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress",
+  ], { timeout: 10_000 });
+  return JSON.parse(stdout);
+}
+
 /** Close the server before deleting its files; fail explicitly if shutdown needs forced termination. */
 async function stopServer(timeoutMs = 15_000, beforeForcedTermination?: () => Promise<void>): Promise<void> {
   const proc = child;
+  const windowsPids = process.platform === "win32" && proc?.pid !== undefined ? [proc.pid] : [];
+  const windowsSnapshot = windowsPids.length ? await windowsProcesses() : [];
+  // Retain descendants before EOF can make their wrapper exit.
+  for (const parent of windowsPids) {
+    for (const entry of windowsSnapshot) {
+      if (entry.ParentProcessId === parent && !windowsPids.includes(entry.ProcessId)) windowsPids.push(entry.ProcessId);
+    }
+  }
   let shutdownTimedOut = false;
   if (proc && proc.exitCode === null && proc.signalCode === null) {
     // EOF reaches the server through the tsx wrapper; wait for its streams
@@ -58,10 +81,21 @@ async function stopServer(timeoutMs = 15_000, beforeForcedTermination?: () => Pr
       if (shutdownTimedOut && proc.pid !== undefined) {
         if (beforeForcedTermination) await beforeForcedTermination();
         if (process.platform === "win32") {
-          try {
-            await execFileAsync("taskkill", ["/pid", String(proc.pid), "/t", "/f"], { timeout: 10_000 });
-          } catch (error) {
-            if (proc.exitCode === null && proc.signalCode === null) throw error;
+          const currentProcesses = await windowsProcesses();
+          for (const pid of windowsPids.reverse()) {
+            if (pid === proc.pid && (proc.exitCode !== null || proc.signalCode !== null)) continue;
+            const original = windowsSnapshot.find((entry) => entry.ProcessId === pid);
+            if (!original || !currentProcesses.some((entry) => entry.ProcessId === pid && entry.CreationDate === original.CreationDate)) continue;
+            try {
+              await execFileAsync("taskkill", ["/pid", String(pid), "/t", "/f"], { timeout: 10_000 });
+            } catch (error) {
+              try {
+                process.kill(pid, 0);
+              } catch (probeError) {
+                if (probeError instanceof Error && "code" in probeError && probeError.code === "ESRCH") continue;
+              }
+              throw error;
+            }
           }
         } else {
           try {
@@ -70,7 +104,12 @@ async function stopServer(timeoutMs = 15_000, beforeForcedTermination?: () => Pr
             if (!(error instanceof Error) || !("code" in error) || error.code !== "ESRCH") throw error;
           }
         }
-        await childClosed;
+        clearTimeout(timeout);
+        const streamsClosed = await Promise.race([
+          childClosed.then(() => true),
+          new Promise<false>((resolve) => { timeout = setTimeout(() => resolve(false), 10_000); }),
+        ]);
+        if (!streamsClosed) throw new Error("MCP logging server streams did not close within 10000 milliseconds after forced termination; temporary files were retained.");
       }
     } finally {
       clearTimeout(timeout);
@@ -187,9 +226,9 @@ async function waitFor(check: () => boolean, timeoutMs: number, failed: () => Er
 const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
 
 describe("MCP logging over stdio", () => {
-  it.each(["exit", "close"] as const)("cleans up and retains the timeout error when %s precedes forced termination", async (event) => {
-    const descendant = "require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'] }).unref(); ";
-    const script = `${event === "exit" ? descendant : ""}process.stdin.resume(); process.stdout.write('ready'); setInterval(() => {}, 1000);`;
+  it.each(["exit", "close", "exit before EOF"] as const)("cleans up and retains the timeout error when %s precedes forced termination", async (event) => {
+    const descendant = "const descendant = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'] }); descendant.unref(); process.stdout.write(String(descendant.pid)); ";
+    const script = `${event !== "close" ? descendant : "process.stdout.write('ready');"}process.stdin.resume(); setInterval(() => {}, 1000);`;
     const proc = spawn(process.execPath, ["-e", script], {
       stdio: ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
@@ -199,18 +238,36 @@ describe("MCP logging over stdio", () => {
     const closed = new Promise<void>((resolve) => proc.once("close", () => resolve()));
     childClosed = closed;
     proc.stderr.resume();
-    await new Promise<void>((resolve) => proc.stdout.once("data", () => resolve()));
+    const descendantPid = await new Promise<number>((resolve) => proc.stdout.once("data", (chunk) => resolve(Number(String(chunk)))));
 
     let terminationStarted = false;
-    await expect(stopServer(100, async () => {
-      terminationStarted = true;
+    if (event === "exit before EOF") {
       proc.kill();
-      await (event === "exit" ? exited : closed);
-    })).rejects.toThrow("process tree was terminated");
-    expect(terminationStarted).toBe(true);
-    expect(child).toBeUndefined();
-    expect(childClosed).toBeUndefined();
-    await expect(fsp.stat(workDir)).rejects.toMatchObject({ code: "ENOENT" });
+      await exited;
+    }
+    try {
+      await expect(stopServer(100, async () => {
+        terminationStarted = true;
+        proc.kill();
+        await (event !== "close" ? exited : closed);
+      })).rejects.toThrow("process tree was terminated");
+      expect(terminationStarted).toBe(true);
+      expect(child).toBeUndefined();
+      expect(childClosed).toBeUndefined();
+      await expect(fsp.stat(workDir)).rejects.toMatchObject({ code: "ENOENT" });
+    } catch (error) {
+      // A failed cleanup assertion must not leave the persistent fixture behind.
+      if (Number.isInteger(descendantPid) && descendantPid > 0) {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch (cleanupError) {
+          if (!(cleanupError instanceof Error) || !("code" in cleanupError) || cleanupError.code !== "ESRCH") {
+            throw new AggregateError([error, cleanupError], "Cleanup assertion and fixture termination both failed");
+          }
+        }
+      }
+      throw error;
+    }
   });
 
   it("fails and removes the whole process tree when EOF shutdown stalls", async () => {
