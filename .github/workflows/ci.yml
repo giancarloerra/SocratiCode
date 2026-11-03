@@ -123,6 +123,7 @@ jobs:
       QDRANT_MODE: managed
       EMBEDDING_PROVIDER: ollama
       OLLAMA_MODE: docker
+      OLLAMA_URL: http://127.0.0.1:11435
       SOCRATICODE_AUTO_RESUME: "off"
       REQUIRE_QDRANT: "1"
     steps:

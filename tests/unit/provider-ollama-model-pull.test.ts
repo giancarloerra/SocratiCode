@@ -14,7 +14,7 @@ vi.mock("ollama", () => ({
 
 describe("Ollama model-download deadline", () => {
   beforeEach(() => {
-    vi.useFakeTimers();
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     vi.stubEnv("EMBEDDING_PROVIDER", "ollama");
     vi.stubEnv("EMBEDDING_MODEL", "nomic-embed-text");
     vi.stubEnv("OLLAMA_MODE", "external");
