@@ -71,7 +71,9 @@ This document covers the internals of **SocratiCode** — architecture, data flo
 | Tool | Version | Purpose |
 |------|---------|---------|
 | Node.js | 18.17+ | Server runtime |
-| Node.js | 22.22.2+ in 22.x, 24.15+ in 24.x, or 26+ | Release and extension packaging |
+| Node.js | 20.19+ in 20.x, 22.12+ in 22.x, or 24+ | Tests (Vitest/Vite) |
+| Node.js | 22+ | Extension packaging |
+| Node.js | 22.22.2+ in 22.x, 24.15+ in 24.x, or 26+ | Release tooling |
 | npm | 9+ | Package manager |
 | TypeScript | 5.9.x for the server, 7.x for the extension | Installed by npm; the server uses the JavaScript compiler API |
 | Docker | Any recent | Runs Qdrant |
