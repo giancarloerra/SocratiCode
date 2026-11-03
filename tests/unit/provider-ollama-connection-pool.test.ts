@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:http";
 import type { Socket } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resetEmbeddingConfig } from "../../src/services/embedding-config.js";
-import { OllamaEmbeddingProvider, resetOllamaClient, resetOllamaReadinessCache } from "../../src/services/provider-ollama.js";
+import { isModelAvailable, isOllamaAvailable, OllamaEmbeddingProvider, resetOllamaClient, resetOllamaReadinessCache } from "../../src/services/provider-ollama.js";
 
 /**
  * Issue 114: the Ollama client rode Node's default fetch pool, which has no
@@ -37,7 +37,7 @@ describe("ollama connection pool", () => {
       authorizations.push(req.headers.authorization);
       req.resume();
       req.on("end", () => {
-        if (req.url === "/api/embed" && redirectLocation) {
+        if ((req.url === "/api/embed" || req.url === "/api/tags") && redirectLocation) {
           res.writeHead(redirectStatus, { location: redirectLocation });
           res.end();
           return;
@@ -154,6 +154,32 @@ describe("ollama connection pool", () => {
 
     await expect(new OllamaEmbeddingProvider().embed(["redirected embedding"])).resolves.toEqual([[0.1, 0.2, 0.3]]);
     expect(authorizations).toEqual([requiredAuthorization, requiredAuthorization]);
+  });
+
+  const availabilityChecks: [string, () => Promise<unknown>][] = [
+    ["reachability", isOllamaAvailable],
+    ["model availability", isModelAvailable],
+    ["readiness", () => new OllamaEmbeddingProvider().ensureReady()],
+    ["health", () => new OllamaEmbeddingProvider().healthCheck()],
+  ];
+
+  it.each(availabilityChecks.flatMap(([name, check]) =>
+    [307, 308].map((status) => [name, status, check] as const),
+  ))("preserves the HTTPS policy error from %s after a %i model-list redirect", async (_name, status, check) => {
+    process.env.OLLAMA_API_KEY = "fixture-redirect-key";
+    redirectStatus = status;
+    redirectLocation = "http://192.0.2.10:11434/api/tags";
+
+    await expect(check()).rejects.toThrow(/OLLAMA_API_KEY.*HTTPS/);
+    expect(authorizations).toEqual(["Bearer fixture-redirect-key"]);
+  });
+
+  it.each([
+    ["reachability", isOllamaAvailable],
+    ["model availability", isModelAvailable],
+  ] as const)("keeps ordinary server failures unavailable for %s", async (_name, check) => {
+    failNext = 1;
+    await expect(check()).resolves.toBe(false);
   });
 
   it("uses a changed key without requiring a client reset", async () => {

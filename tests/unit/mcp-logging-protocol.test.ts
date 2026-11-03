@@ -40,7 +40,7 @@ beforeEach(async () => {
 });
 
 /** Close the server before deleting its files; fail explicitly if shutdown needs forced termination. */
-async function stopServer(timeoutMs = 15_000): Promise<void> {
+async function stopServer(timeoutMs = 15_000, beforeForcedTermination?: () => Promise<void>): Promise<void> {
   const proc = child;
   let shutdownTimedOut = false;
   if (proc && proc.exitCode === null && proc.signalCode === null) {
@@ -56,8 +56,13 @@ async function stopServer(timeoutMs = 15_000): Promise<void> {
         new Promise<true>((resolve) => { timeout = setTimeout(() => resolve(true), timeoutMs); }),
       ]);
       if (shutdownTimedOut && proc.pid !== undefined) {
+        if (beforeForcedTermination) await beforeForcedTermination();
         if (process.platform === "win32") {
-          await execFileAsync("taskkill", ["/pid", String(proc.pid), "/t", "/f"], { timeout: 10_000 });
+          try {
+            await execFileAsync("taskkill", ["/pid", String(proc.pid), "/t", "/f"], { timeout: 10_000 });
+          } catch (error) {
+            if (proc.exitCode === null && proc.signalCode === null) throw error;
+          }
         } else {
           try {
             process.kill(-proc.pid, "SIGKILL");
@@ -182,6 +187,32 @@ async function waitFor(check: () => boolean, timeoutMs: number, failed: () => Er
 const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
 
 describe("MCP logging over stdio", () => {
+  it.each(["exit", "close"] as const)("cleans up and retains the timeout error when %s precedes forced termination", async (event) => {
+    const descendant = "require('node:child_process').spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'] }).unref(); ";
+    const script = `${event === "exit" ? descendant : ""}process.stdin.resume(); process.stdout.write('ready'); setInterval(() => {}, 1000);`;
+    const proc = spawn(process.execPath, ["-e", script], {
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    });
+    child = proc;
+    const exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
+    const closed = new Promise<void>((resolve) => proc.once("close", () => resolve()));
+    childClosed = closed;
+    proc.stderr.resume();
+    await new Promise<void>((resolve) => proc.stdout.once("data", () => resolve()));
+
+    let terminationStarted = false;
+    await expect(stopServer(100, async () => {
+      terminationStarted = true;
+      proc.kill();
+      await (event === "exit" ? exited : closed);
+    })).rejects.toThrow("process tree was terminated");
+    expect(terminationStarted).toBe(true);
+    expect(child).toBeUndefined();
+    expect(childClosed).toBeUndefined();
+    await expect(fsp.stat(workDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("fails and removes the whole process tree when EOF shutdown stalls", async () => {
     const descendant = "process.stdin.resume(); process.stdout.write('ready'); setInterval(() => {}, 1000);";
     const wrapper = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: ['pipe', 'inherit', 'inherit'] }); process.stdin.resume(); setInterval(() => {}, 1000);`;

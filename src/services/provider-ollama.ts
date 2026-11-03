@@ -145,7 +145,8 @@ export async function isOllamaAvailable(): Promise<boolean> {
     const client = getClient();
     await client.list();
     return true;
-  } catch {
+  } catch (error) {
+    if (error instanceof OllamaTransportError) throw error;
     return false;
   }
 }
@@ -159,7 +160,8 @@ export async function isModelAvailable(): Promise<boolean> {
     return models.models.some(
       (m) => m.name === config.embeddingModel || m.name.startsWith(`${config.embeddingModel}:`),
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof OllamaTransportError) throw error;
     return false;
   }
 }
