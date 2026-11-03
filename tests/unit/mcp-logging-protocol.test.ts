@@ -11,10 +11,11 @@
  * JSON-RPC to it, the way an MCP host does.
  */
 
-import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, execFile, spawn } from "node:child_process";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 interface RpcMessage {
@@ -28,6 +29,7 @@ interface RpcMessage {
 
 /** Nothing listens here, so external Qdrant readiness fails without touching a real server. */
 const UNREACHABLE = "http://127.0.0.1:9";
+const execFileAsync = promisify(execFile);
 
 let child: ChildProcessWithoutNullStreams | undefined;
 let childClosed: Promise<void> | undefined;
@@ -37,18 +39,45 @@ beforeEach(async () => {
   workDir = await fsp.mkdtemp(path.join(os.tmpdir(), "socraticode-logging-protocol-"));
 });
 
-afterEach(async () => {
+/** Close the server before deleting its files; fail explicitly if shutdown needs forced termination. */
+async function stopServer(timeoutMs = 15_000): Promise<void> {
   const proc = child;
+  let shutdownTimedOut = false;
   if (proc && proc.exitCode === null && proc.signalCode === null) {
     // EOF reaches the server through the tsx wrapper; wait for its streams
     // to close before removing a directory the server can still log into.
     proc.stdin.end();
   }
-  await childClosed;
+  if (proc && childClosed) {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      shutdownTimedOut = await Promise.race([
+        childClosed.then(() => false),
+        new Promise<true>((resolve) => { timeout = setTimeout(() => resolve(true), timeoutMs); }),
+      ]);
+      if (shutdownTimedOut && proc.pid !== undefined) {
+        if (process.platform === "win32") {
+          await execFileAsync("taskkill", ["/pid", String(proc.pid), "/t", "/f"], { timeout: 10_000 });
+        } else {
+          try {
+            process.kill(-proc.pid, "SIGKILL");
+          } catch (error) {
+            if (!(error instanceof Error) || !("code" in error) || error.code !== "ESRCH") throw error;
+          }
+        }
+        await childClosed;
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
   child = undefined;
   childClosed = undefined;
   await fsp.rm(workDir, { recursive: true, force: true });
-});
+  if (shutdownTimedOut) throw new Error(`MCP logging server did not close within ${timeoutMs} milliseconds after stdin EOF; its process tree was terminated.`);
+}
+
+afterEach(() => stopServer());
 
 /** Start the server from source over stdio, isolated from the caller's configuration. */
 function startServer(logFile: string) {
@@ -71,6 +100,7 @@ function startServer(logFile: string) {
     cwd: path.resolve("."),
     env,
     stdio: ["pipe", "pipe", "pipe"],
+    detached: process.platform !== "win32",
   });
   child = proc;
   childClosed = new Promise<void>((resolve) => proc.once("close", () => resolve()));
@@ -152,6 +182,22 @@ async function waitFor(check: () => boolean, timeoutMs: number, failed: () => Er
 const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
 
 describe("MCP logging over stdio", () => {
+  it("fails and removes the whole process tree when EOF shutdown stalls", async () => {
+    const descendant = "process.stdin.resume(); process.stdout.write('ready'); setInterval(() => {}, 1000);";
+    const wrapper = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: ['pipe', 'inherit', 'inherit'] }); process.stdin.resume(); setInterval(() => {}, 1000);`;
+    const proc = spawn(process.execPath, ["-e", wrapper], {
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    });
+    child = proc;
+    childClosed = new Promise<void>((resolve) => proc.once("close", () => resolve()));
+    proc.stderr.resume();
+    await new Promise<void>((resolve) => proc.stdout.once("data", () => resolve()));
+
+    await expect(stopServer(100)).rejects.toThrow("process tree was terminated");
+    await expect(fsp.stat(workDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("advertises logging, accepts logging/setLevel, and delivers one notification per log line", async () => {
     const logFile = path.join(workDir, "server.log");
     const server = startServer(logFile);

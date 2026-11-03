@@ -22,17 +22,26 @@ describe("ollama connection pool", () => {
   let failNext = 0;
   let requiredAuthorization: string | undefined;
   let authorizations: (string | undefined)[];
+  let redirectLocation: string | undefined;
+  let redirectStatus: number;
 
   beforeEach(async () => {
     opened = 0;
     failNext = 0;
     requiredAuthorization = undefined;
     authorizations = [];
+    redirectLocation = undefined;
+    redirectStatus = 307;
     openSockets = new Set();
     server = createServer((req, res) => {
       authorizations.push(req.headers.authorization);
       req.resume();
       req.on("end", () => {
+        if (req.url === "/api/embed" && redirectLocation) {
+          res.writeHead(redirectStatus, { location: redirectLocation });
+          res.end();
+          return;
+        }
         if (requiredAuthorization && req.headers.authorization !== requiredAuthorization) {
           res.writeHead(401, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "Unauthorized" }));
@@ -126,6 +135,25 @@ describe("ollama connection pool", () => {
   it("omits authorization when no key is configured", async () => {
     await new OllamaEmbeddingProvider().embed(["unauthenticated embedding"]);
     expect(authorizations).toEqual([undefined]);
+  });
+
+  it.each([307, 308])("blocks a keyed %s redirect to remote HTTP before sending request content", async (status) => {
+    process.env.OLLAMA_API_KEY = "fixture-redirect-key";
+    redirectStatus = status;
+    redirectLocation = "http://192.0.2.10:11434/api/embed";
+
+    await expect(new OllamaEmbeddingProvider().embed(["redirected embedding"])).rejects.toThrow(/OLLAMA_API_KEY.*HTTPS/);
+    expect(authorizations).toEqual(["Bearer fixture-redirect-key"]);
+  });
+
+  it.each([307, 308])("preserves keyed loopback redirects and request authentication for %s", async (status) => {
+    process.env.OLLAMA_API_KEY = "fixture-redirect-key";
+    requiredAuthorization = "Bearer fixture-redirect-key";
+    redirectStatus = status;
+    redirectLocation = `http://127.0.0.1:${port}/redirected-embed`;
+
+    await expect(new OllamaEmbeddingProvider().embed(["redirected embedding"])).resolves.toEqual([[0.1, 0.2, 0.3]]);
+    expect(authorizations).toEqual([requiredAuthorization, requiredAuthorization]);
   });
 
   it("uses a changed key without requiring a client reset", async () => {

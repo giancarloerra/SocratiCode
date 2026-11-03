@@ -18,6 +18,12 @@ async function getInfraStatusSummary(): Promise<string[]> {
       const endpoint = QDRANT_URL ?? `http://${QDRANT_HOST}:${QDRANT_PORT}`;
       try {
         await listCodebaseCollections(); // throws if unreachable
+      } catch {
+        lines.push(`Infrastructure: ❌ Cannot reach external Qdrant at ${endpoint}`);
+        lines.push("  Check QDRANT_URL / QDRANT_HOST and make sure the server is running.");
+        return lines;
+      }
+      try {
         const provider = await getEmbeddingProvider();
         const health = await provider.healthCheck();
         if (health.available) {
@@ -25,9 +31,9 @@ async function getInfraStatusSummary(): Promise<string[]> {
         } else {
           lines.push(`Infrastructure: ⚠️ External Qdrant reachable (${endpoint}), but ${config.embeddingProvider} embeddings not ready`);
         }
-      } catch {
-        lines.push(`Infrastructure: ❌ Cannot reach external Qdrant at ${endpoint}`);
-        lines.push("  Check QDRANT_URL / QDRANT_HOST and make sure the server is running.");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        lines.push(`Infrastructure: ❌ External Qdrant reachable (${endpoint}), but ${config.embeddingProvider} provider check failed: ${message}`);
       }
     } else {
       const docker = await isDockerAvailable();
@@ -110,9 +116,14 @@ export async function handleManageTool(
       // Embedding provider health check (works for ollama, openai, google)
       lines.push("");
       lines.push(`Embedding provider: ${config.embeddingProvider}`);
-      const provider = await getEmbeddingProvider();
-      const health = await provider.healthCheck();
-      lines.push(...health.statusLines);
+      try {
+        const provider = await getEmbeddingProvider();
+        const health = await provider.healthCheck();
+        lines.push(...health.statusLines);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        lines.push(`${icon(false)} Embedding provider check failed: ${message}`);
+      }
 
       lines.push("");
       if (QDRANT_MODE === "external") {

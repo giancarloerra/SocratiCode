@@ -28,6 +28,9 @@ const loopbackAddresses = new BlockList();
 loopbackAddresses.addSubnet("127.0.0.0", 8, "ipv4");
 loopbackAddresses.addAddress("::1", "ipv6");
 
+class OllamaTransportError extends Error {}
+
+/** Keep keyed Ollama requests on HTTPS, except for explicitly supported loopback HTTP. */
 function assertOllamaTransport(host: string, apiKey: string | undefined): void {
   if (!apiKey) return;
   let url: URL;
@@ -44,7 +47,7 @@ function assertOllamaTransport(host: string, apiKey: string | undefined): void {
   const loopback = hostname === "localhost" || hostname === "localhost." ||
     (family !== 0 && loopbackAddresses.check(hostname, family === 4 ? "ipv4" : "ipv6"));
   if (url.protocol !== "http:" || !loopback) {
-    throw new Error("OLLAMA_API_KEY requires HTTPS for remote servers. Use an HTTPS OLLAMA_URL; HTTP is supported only for loopback endpoints when an API key is configured.");
+    throw new OllamaTransportError("OLLAMA_API_KEY requires HTTPS for remote servers. Use an HTTPS OLLAMA_URL; HTTP is supported only for loopback endpoints when an API key is configured.");
   }
 }
 
@@ -84,14 +87,30 @@ function getClient(): Ollama {
       keepAliveMaxTimeout: 30_000,
     });
     ollamaDispatcher = dispatcher;
+    const transportDispatcher = config.ollamaApiKey
+      ? dispatcher.compose((dispatch) => (options, handler) => {
+        // Fetch dispatches redirects separately. Apply the configured transport
+        // policy before each destination receives any request content.
+        assertOllamaTransport(String(options.origin), config.ollamaApiKey);
+        return dispatch(options, handler);
+      })
+      : dispatcher;
     ollamaClient = new Ollama({
       host: config.ollamaUrl,
       headers: config.ollamaApiKey ? { Authorization: `Bearer ${config.ollamaApiKey}` } : undefined,
       // undici's Response type predates the global one (no .bytes()), so the
       // wrapper cannot satisfy `typeof fetch` structurally; the runtime shape
       // is what the ollama client consumes and matches.
-      fetch: ((input: Parameters<typeof undiciFetch>[0], init?: Parameters<typeof undiciFetch>[1]) =>
-        undiciFetch(input, { ...init, dispatcher })) as unknown as typeof fetch,
+      fetch: (async (input: Parameters<typeof undiciFetch>[0], init?: Parameters<typeof undiciFetch>[1]) => {
+        try {
+          return await undiciFetch(input, { ...init, dispatcher: transportDispatcher });
+        } catch (error) {
+          // Preserve the actionable policy failure rather than Fetch's generic
+          // "fetch failed" message. Other transport failures keep their cause.
+          if (error instanceof TypeError && error.cause instanceof OllamaTransportError) throw error.cause;
+          throw error;
+        }
+      }) as unknown as typeof fetch,
     });
     ollamaClientHost = config.ollamaUrl;
     ollamaClientConnections = config.ollamaMaxConnections;
