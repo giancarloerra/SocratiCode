@@ -6,7 +6,6 @@ import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { MAX_CHUNK_CHARS } from "../../src/constants.js";
 import { buildCodeGraph, ensureDynamicLanguages, gdscriptParserAvailable, getDynamicLanguageStatus } from "../../src/services/code-graph.js";
 import { decodeGdscriptString, extractGdscriptImportsRegex, extractGodotResourceImports, extractImports, parseTscnSectionHeader } from "../../src/services/graph-imports.js";
 import {
@@ -1193,8 +1192,9 @@ func setup():
       ];
       // Keep this line/AST-boundary fixture below the independently enforced
       // character cap so that cap splitting cannot change these expectations.
-      expect(lines.slice(0, 100).join("\n").length).toBeLessThanOrEqual(MAX_CHUNK_CHARS);
-      const chunks = chunkFileContent("/tmp/main.gd", "main.gd", lines.join("\n"));
+      const maxChunkChars = 2000;
+      expect(lines.slice(0, 100).join("\n").length).toBeLessThanOrEqual(maxChunkChars);
+      const chunks = chunkFileContent("/tmp/main.gd", "main.gd", lines.join("\n"), { maxChunkChars });
 
       expect(chunks.every((chunk) => chunk.language === "gdscript")).toBe(true);
       expect(chunks.map((chunk) => chunk.startLine)).toEqual(
@@ -1203,7 +1203,7 @@ func setup():
       const available = gdscriptParserAvailable;
       try {
         setGdscriptParserAvailable(false);
-        const fallback = chunkFileContent("/tmp/main.gd", "main.gd", lines.join("\n"));
+        const fallback = chunkFileContent("/tmp/main.gd", "main.gd", lines.join("\n"), { maxChunkChars });
         expect(fallback.map((chunk) => chunk.startLine)).toEqual([1, 91]);
       } finally {
         setGdscriptParserAvailable(available);

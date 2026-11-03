@@ -331,8 +331,9 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
     const client = getClient();
 
     const pullPromise = client.pull({ model });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(
+      timeout = setTimeout(
         () => reject(new Error(
           `Embedding model download timed out after ${MODEL_PULL_TIMEOUT_MS / 60_000} minutes. ` +
           `The model '${model}' may be too large or the network is slow. Try again.`,
@@ -351,6 +352,8 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
         `Failed to download embedding model '${model}'. ` +
         `Check that the model name is correct and Ollama is responsive.\nDetails: ${msg}`,
       );
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
