@@ -6,7 +6,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { z } from "zod";
+import { z } from "zod/v3";
 import { coreProjectId, sanitizeBranchName } from "../config.js";
 import { QDRANT_HOST, QDRANT_MODE, QDRANT_URL } from "../constants.js";
 

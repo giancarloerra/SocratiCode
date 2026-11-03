@@ -4,7 +4,7 @@ import { createServer, type Server } from "node:http";
 import type { Socket } from "node:net";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resetEmbeddingConfig } from "../../src/services/embedding-config.js";
-import { OllamaEmbeddingProvider, resetOllamaClient } from "../../src/services/provider-ollama.js";
+import { OllamaEmbeddingProvider, resetOllamaClient, resetOllamaReadinessCache } from "../../src/services/provider-ollama.js";
 
 /**
  * Issue 114: the Ollama client rode Node's default fetch pool, which has no
@@ -20,21 +20,33 @@ describe("ollama connection pool", () => {
   let opened = 0;
   let openSockets: Set<Socket>;
   let failNext = 0;
+  let requiredAuthorization: string | undefined;
+  let authorizations: (string | undefined)[];
 
   beforeEach(async () => {
     opened = 0;
     failNext = 0;
+    requiredAuthorization = undefined;
+    authorizations = [];
     openSockets = new Set();
     server = createServer((req, res) => {
+      authorizations.push(req.headers.authorization);
       req.resume();
       req.on("end", () => {
+        if (requiredAuthorization && req.headers.authorization !== requiredAuthorization) {
+          res.writeHead(401, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "Unauthorized" }));
+          return;
+        }
         if (failNext > 0) {
           failNext--;
           res.writeHead(500, { "content-type": "application/json" });
           res.end(JSON.stringify({ error: "fixture failure" }));
           return;
         }
-        const body = JSON.stringify({ embeddings: [[0.1, 0.2, 0.3]] });
+        const body = JSON.stringify(req.url === "/api/tags"
+          ? { models: [{ name: "nomic-embed-text:latest" }] }
+          : { embeddings: [[0.1, 0.2, 0.3]] });
         // A small delay keeps requests genuinely concurrent, so the peak
         // socket count measures the pool bound rather than scheduling luck.
         setTimeout(() => {
@@ -60,14 +72,18 @@ describe("ollama connection pool", () => {
 
     resetEmbeddingConfig();
     resetOllamaClient();
+    resetOllamaReadinessCache();
     process.env.EMBEDDING_PROVIDER = "ollama";
+    process.env.EMBEDDING_MODEL = "nomic-embed-text";
     process.env.OLLAMA_MODE = "external";
     process.env.OLLAMA_URL = `http://127.0.0.1:${port}`;
     delete process.env.OLLAMA_MAX_CONNECTIONS;
+    delete process.env.OLLAMA_API_KEY;
   });
 
   afterEach(async () => {
     resetOllamaClient();
+    resetOllamaReadinessCache();
     resetEmbeddingConfig();
     process.env = { ...originalEnv };
     for (const socket of openSockets) socket.destroy();
@@ -94,6 +110,73 @@ describe("ollama connection pool", () => {
     const provider = new OllamaEmbeddingProvider();
     await Promise.all(Array.from({ length: 12 }, (_, i) => provider.embed([`t-${i}`])));
     expect(opened).toBeLessThanOrEqual(2);
+  });
+
+  it("authenticates model readiness and embedding requests with the configured key", async () => {
+    requiredAuthorization = "Bearer fixture-key-one";
+    process.env.OLLAMA_API_KEY = "fixture-key-one";
+    const provider = new OllamaEmbeddingProvider();
+
+    await provider.ensureReady();
+    await expect(provider.embed(["authenticated embedding"])).resolves.toEqual([[0.1, 0.2, 0.3]]);
+    expect(authorizations.length).toBeGreaterThan(0);
+    expect(authorizations.every((value) => value === requiredAuthorization)).toBe(true);
+  });
+
+  it("omits authorization when no key is configured", async () => {
+    await new OllamaEmbeddingProvider().embed(["unauthenticated embedding"]);
+    expect(authorizations).toEqual([undefined]);
+  });
+
+  it("uses a changed key without requiring a client reset", async () => {
+    requiredAuthorization = "Bearer fixture-key-one";
+    process.env.OLLAMA_API_KEY = "fixture-key-one";
+    const provider = new OllamaEmbeddingProvider();
+    await provider.embed(["first key"]);
+
+    requiredAuthorization = "Bearer fixture-key-two";
+    process.env.OLLAMA_API_KEY = "fixture-key-two";
+    resetEmbeddingConfig();
+    await expect(provider.embed(["second key"])).resolves.toEqual([[0.1, 0.2, 0.3]]);
+    expect(authorizations).toEqual(["Bearer fixture-key-one", "Bearer fixture-key-two"]);
+  });
+
+  it("stops sending a key after it is removed from configuration", async () => {
+    process.env.OLLAMA_API_KEY = "fixture-key-one";
+    const provider = new OllamaEmbeddingProvider();
+    await provider.embed(["with key"]);
+
+    delete process.env.OLLAMA_API_KEY;
+    resetEmbeddingConfig();
+    await provider.embed(["without key"]);
+    expect(authorizations).toEqual(["Bearer fixture-key-one", undefined]);
+  });
+
+  it("rejects an invalid key without including it in the error", async () => {
+    requiredAuthorization = "Bearer fixture-key-one";
+    const invalidKey = "fixture-invalid-key";
+    process.env.OLLAMA_API_KEY = invalidKey;
+    let failure: unknown;
+    try {
+      await new OllamaEmbeddingProvider().embed(["invalid key"]);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect(String(failure)).toContain("Unauthorized");
+    expect(String(failure)).not.toContain(invalidKey);
+  });
+
+  it("rechecks readiness after the configured key changes", async () => {
+    requiredAuthorization = "Bearer fixture-key-one";
+    process.env.OLLAMA_API_KEY = "fixture-key-one";
+    const provider = new OllamaEmbeddingProvider();
+    await provider.ensureReady();
+
+    process.env.OLLAMA_API_KEY = "fixture-invalid-key";
+    resetEmbeddingConfig();
+    await expect(provider.ensureReady()).rejects.toThrow("Ollama is not reachable");
+    expect(authorizations.at(-1)).toBe("Bearer fixture-invalid-key");
   });
 
   it("rejects on a failing response and stays bounded through failures", async () => {

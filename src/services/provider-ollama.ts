@@ -7,6 +7,7 @@
  * into the EmbeddingProvider interface.
  */
 
+import { BlockList, isIP } from "node:net";
 import { Ollama } from "ollama";
 import { Agent, fetch as undiciFetch } from "undici";
 import type { InfraProgressCallback } from "./docker.js";
@@ -20,15 +21,42 @@ import { logger } from "./logger.js";
 let ollamaClient: Ollama | null = null;
 let ollamaClientHost: string | null = null;
 let ollamaClientConnections: number | null = null;
+let ollamaClientApiKey: string | undefined;
 let ollamaDispatcher: Agent | null = null;
+
+const loopbackAddresses = new BlockList();
+loopbackAddresses.addSubnet("127.0.0.0", 8, "ipv4");
+loopbackAddresses.addAddress("::1", "ipv6");
+
+function assertOllamaTransport(host: string, apiKey: string | undefined): void {
+  if (!apiKey) return;
+  let url: URL;
+  try {
+    // Match the SDK's supported scheme-less and port-only host syntax.
+    const normalized = host.startsWith(":") ? `http://127.0.0.1${host}` : host.includes("://") ? host : `http://${host}`;
+    url = new URL(normalized);
+  } catch {
+    throw new TypeError("Invalid OLLAMA_URL. Configure a valid HTTPS URL or an HTTP loopback endpoint.");
+  }
+  if (url.protocol === "https:") return;
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  const family = isIP(hostname);
+  const loopback = hostname === "localhost" || hostname === "localhost." ||
+    (family !== 0 && loopbackAddresses.check(hostname, family === 4 ? "ipv4" : "ipv6"));
+  if (url.protocol !== "http:" || !loopback) {
+    throw new Error("OLLAMA_API_KEY requires HTTPS for remote servers. Use an HTTPS OLLAMA_URL; HTTP is supported only for loopback endpoints when an API key is configured.");
+  }
+}
 
 function getClient(): Ollama {
   const config = getEmbeddingConfig();
   if (
     !ollamaClient ||
     ollamaClientHost !== config.ollamaUrl ||
-    ollamaClientConnections !== config.ollamaMaxConnections
+    ollamaClientConnections !== config.ollamaMaxConnections ||
+    ollamaClientApiKey !== config.ollamaApiKey
   ) {
+    assertOllamaTransport(config.ollamaUrl, config.ollamaApiKey);
     // An orphaned pool keeps its idle sockets until they time out, so close
     // the previous dispatcher whenever the client is rebuilt. close() stops
     // the old agent accepting new dispatches immediately and lets in-flight
@@ -58,6 +86,7 @@ function getClient(): Ollama {
     ollamaDispatcher = dispatcher;
     ollamaClient = new Ollama({
       host: config.ollamaUrl,
+      headers: config.ollamaApiKey ? { Authorization: `Bearer ${config.ollamaApiKey}` } : undefined,
       // undici's Response type predates the global one (no .bytes()), so the
       // wrapper cannot satisfy `typeof fetch` structurally; the runtime shape
       // is what the ollama client consumes and matches.
@@ -66,6 +95,7 @@ function getClient(): Ollama {
     });
     ollamaClientHost = config.ollamaUrl;
     ollamaClientConnections = config.ollamaMaxConnections;
+    ollamaClientApiKey = config.ollamaApiKey;
   }
   return ollamaClient;
 }
@@ -76,6 +106,7 @@ export function resetOllamaClient(): void {
   ollamaClient = null;
   ollamaClientHost = null;
   ollamaClientConnections = null;
+  ollamaClientApiKey = undefined;
   ollamaDispatcher = null;
   if (previous) {
     previous.close().catch((err: unknown) => {
@@ -227,8 +258,10 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
       config = getEmbeddingConfig();
     }
 
+    assertOllamaTransport(config.ollamaUrl, config.ollamaApiKey);
     const readinessIdentity = JSON.stringify({
       url: config.ollamaUrl,
+      apiKey: config.ollamaApiKey,
       model: config.embeddingModel,
       dimensions: config.embeddingDimensions,
     });
@@ -326,6 +359,7 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
       await detectNativeOllama();
     }
     const config = getEmbeddingConfig();
+    assertOllamaTransport(config.ollamaUrl, config.ollamaApiKey);
     const lines: string[] = [];
     const icon = (ok: boolean) => (ok ? "[OK]" : "[MISSING]");
 

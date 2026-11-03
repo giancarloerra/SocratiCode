@@ -74,6 +74,27 @@ describe.skipIf(!isDockerAvailable())("Git refresh across two real MCP processes
     return (result.content as Array<{ text?: string }>).map((part) => part.text ?? "").join("\n");
   }
 
+  it("preserves tool schemas and keeps the connection usable after invalid input", async () => {
+    for (const client of clients) {
+      const { tools } = await client.listTools();
+      const search = tools.find((tool) => tool.name === "codebase_search");
+      expect(search?.inputSchema).toMatchObject({
+        type: "object",
+        required: ["query"],
+        properties: {
+          query: { type: "string" },
+          limit: { type: "number", minimum: 1, maximum: 50 },
+        },
+      });
+      const invalid = await client.callTool({ name: "codebase_search", arguments: { query: 3 } });
+      expect(invalid.isError).toBe(true);
+      expect(JSON.stringify(invalid.content)).toMatch(/Invalid arguments for tool codebase_search/);
+      const about = await client.callTool({ name: "codebase_about", arguments: {} });
+      expect(about.isError, diagnostics.slice(-3).join("\n")).not.toBe(true);
+      expect(JSON.stringify(about.content)).toContain("SocratiCode");
+    }
+  });
+
   it("reports lock contention as pending, retries, converges on the same head, and releases locks on shutdown", async () => {
     for (const client of clients) expect(await status(client)).toContain("unverified");
     expect(await acquireIdentityLock(identity, "index", undefined, fixture.root, false)).toBe(true);

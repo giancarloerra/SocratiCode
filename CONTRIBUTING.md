@@ -14,6 +14,10 @@ By submitting a pull request, you agree to the [Contributor License Agreement (C
 - Docker (for integration and E2E tests)
 - Git
 
+Release and extension packaging tools require Node.js 22.22.2 or newer in the
+22.x line, 24.15 or newer in the 24.x line, or 26 and newer. The installed server
+continues to support Node.js 18.17 and newer.
+
 ### Setup
 
 ```bash

@@ -26,15 +26,15 @@ export function ensureElixirTemplateParsers(): Promise<boolean> {
   if (initialization) return initialization;
   initialization = (async () => {
     try {
-      const [{ Language, Parser }, { default: heexWasm }, { default: eexWasm }] = await Promise.all([
+      const [{ Language, Parser }, { default: heexLanguage }, { default: eexLanguage }] = await Promise.all([
         import("web-tree-sitter"),
         import("@lumis-sh/wasm-heex"),
         import("@lumis-sh/wasm-eex"),
       ]);
       await Parser.init();
-      for (const [name, wasm] of [["heex", heexWasm], ["eex", eexWasm]] as const) {
+      for (const [name, language] of [["heex", heexLanguage], ["eex", eexLanguage]] as const) {
         const parser = new Parser();
-        parser.setLanguage(await Language.load(fileURLToPath(wasm)));
+        parser.setLanguage(await Language.load(fileURLToPath(language.wasm)));
         parsers.set(name, parser);
       }
       return true;

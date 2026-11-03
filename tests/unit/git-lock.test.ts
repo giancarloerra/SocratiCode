@@ -31,7 +31,7 @@ describe("Git refresh lock identity through real process boundaries", () => {
         process.stdout.write(String(acquired));
         await releaseAllLocks();
       })().catch(error => { console.error(error); process.exitCode = 1; });`;
-      const probe = () => exec(process.execPath, [fileURLToPath(new URL("../../node_modules/tsx/dist/cli.mjs", import.meta.url)), "--eval", script], { timeout: 15_000 });
+      const probe = () => exec(process.execPath, [fileURLToPath(new URL("../../node_modules/tsx/dist/cli.mjs", import.meta.url)), "--input-type=module", "--eval", script], { timeout: 15_000 });
       expect((await probe()).stdout).toBe("false");
       await releaseProjectLock(fixture.root, "index", target.projectId);
       expect(holdsIdentityLock(target.projectId, "index")).toBe(false);

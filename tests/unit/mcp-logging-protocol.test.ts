@@ -59,7 +59,7 @@ function startServer(logFile: string) {
     SOCRATICODE_LOG_FILE: logFile,
   });
 
-  const proc = spawn(process.execPath, ["--import", "tsx", path.resolve("src/index.ts")], {
+  const proc = spawn(process.execPath, [path.resolve("node_modules/tsx/dist/cli.mjs"), path.resolve("src/index.ts")], {
     cwd: path.resolve("."),
     env,
     stdio: ["pipe", "pipe", "pipe"],
