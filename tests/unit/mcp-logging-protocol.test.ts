@@ -11,7 +11,7 @@
  * JSON-RPC to it, the way an MCP host does.
  */
 
-import { type ChildProcessWithoutNullStreams, execFile, spawn } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, type ExecFileException, execFile, spawn } from "node:child_process";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -48,10 +48,15 @@ interface WindowsProcess {
 
 /** Read identities so an exited process's reused PID is not a cleanup target. */
 async function windowsProcesses(): Promise<WindowsProcess[]> {
+  const started = Date.now();
   const { stdout } = await execFileAsync("powershell.exe", [
     "-NoProfile", "-NonInteractive", "-Command",
     "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress",
-  ], { timeout: 10_000 });
+  ], { timeout: 10_000 }).catch((cause) => {
+    const failure = cause as ExecFileException & { stdout?: string; stderr?: string };
+    const details = { code: failure.code, signal: failure.signal, killed: failure.killed, stdoutBytes: Buffer.byteLength(failure.stdout ?? ""), stderr: failure.stderr };
+    throw new Error(`Windows process lookup failed after ${Date.now() - started}ms: ${JSON.stringify(details)}`, { cause });
+  });
   return JSON.parse(stdout);
 }
 
