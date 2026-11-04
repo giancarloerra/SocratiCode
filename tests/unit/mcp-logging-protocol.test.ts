@@ -46,7 +46,7 @@ interface WindowsProcess {
   CreationDate: string;
 }
 
-/** Read identities so an exited process's reused PID is not a cleanup target. */
+/** Allow bounded PowerShell/CIM startup and retain identities so reused PIDs are not cleanup targets. */
 async function windowsProcesses(): Promise<WindowsProcess[]> {
   const started = Date.now();
   const { stdout } = await execFileAsync("powershell.exe", [
@@ -57,7 +57,6 @@ async function windowsProcesses(): Promise<WindowsProcess[]> {
     const details = { code: failure.code, signal: failure.signal, killed: failure.killed, stdoutBytes: Buffer.byteLength(failure.stdout ?? ""), stderr: failure.stderr };
     throw new Error(`Windows process lookup failed after ${Date.now() - started}ms: ${JSON.stringify(details)}`, { cause });
   });
-  console.error(`Windows process lookup completed in ${Date.now() - started}ms`);
   return JSON.parse(stdout);
 }
 
