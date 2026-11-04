@@ -15,6 +15,7 @@ import { type ChildProcessWithoutNullStreams, execFile, spawn } from "node:child
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -227,8 +228,10 @@ const occurrences = (text: string, needle: string): number => text.split(needle)
 
 describe("MCP logging over stdio", () => {
   it.each(["exit", "close", "exit before EOF"] as const)("cleans up and retains the timeout error when %s precedes forced termination", async (event) => {
-    const descendant = "const descendant = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: ['ignore', 'inherit', 'inherit'] }); descendant.unref(); process.stdout.write(String(descendant.pid)); ";
-    const script = `${event !== "close" ? descendant : "process.stdout.write('ready');"}process.stdin.resume(); setInterval(() => {}, 1000);`;
+    // Windows otherwise ends the child with its parent's job instead of retaining the pipes.
+    const descendantScript = "setInterval(() => {}, 1000); process.stdout.write(String(process.pid) + '\\n');";
+    const descendant = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(descendantScript)}], { detached: process.platform === 'win32', stdio: ['ignore', 'inherit', 'inherit'] }).unref(); `;
+    const script = `${event !== "close" ? descendant : "process.stdout.write('ready\\n');"}process.stdin.resume(); setInterval(() => {}, 1000);`;
     const proc = spawn(process.execPath, ["-e", script], {
       stdio: ["pipe", "pipe", "pipe"],
       detached: process.platform !== "win32",
@@ -238,7 +241,9 @@ describe("MCP logging over stdio", () => {
     const closed = new Promise<void>((resolve) => proc.once("close", () => resolve()));
     childClosed = closed;
     proc.stderr.resume();
-    const descendantPid = await new Promise<number>((resolve) => proc.stdout.once("data", (chunk) => resolve(Number(String(chunk)))));
+    const descendantPid = await new Promise<number>((resolve) => {
+      createInterface({ input: proc.stdout }).once("line", (line) => resolve(Number(line)));
+    });
 
     let terminationStarted = false;
     if (event === "exit before EOF") {
