@@ -7,11 +7,12 @@
  * into the EmbeddingProvider interface.
  */
 
+import { BlockList, isIP } from "node:net";
 import { Ollama } from "ollama";
 import { Agent, fetch as undiciFetch } from "undici";
 import type { InfraProgressCallback } from "./docker.js";
 import { ensureOllamaContainerReady, isDockerAvailable, isOllamaImagePresent, isOllamaRunning, isQdrantRunning } from "./docker.js";
-import { getEmbeddingConfig, setResolvedOllamaMode } from "./embedding-config.js";
+import { defaultOllamaUrl, getEmbeddingConfig, setResolvedOllamaMode } from "./embedding-config.js";
 import type { EmbeddingHealthStatus, EmbeddingProvider, EmbeddingReadinessResult } from "./embedding-types.js";
 import { logger } from "./logger.js";
 
@@ -20,15 +21,46 @@ import { logger } from "./logger.js";
 let ollamaClient: Ollama | null = null;
 let ollamaClientHost: string | null = null;
 let ollamaClientConnections: number | null = null;
+let ollamaClientApiKey: string | undefined;
 let ollamaDispatcher: Agent | null = null;
 
+const loopbackAddresses = new BlockList();
+loopbackAddresses.addSubnet("127.0.0.0", 8, "ipv4");
+loopbackAddresses.addAddress("::1", "ipv6");
+
+class OllamaTransportError extends Error {}
+
+/** Keep keyed Ollama requests on HTTPS, except for explicitly supported loopback HTTP. */
+function assertOllamaTransport(host: string, apiKey: string | undefined): void {
+  if (!apiKey) return;
+  let url: URL;
+  try {
+    // Match the SDK's supported scheme-less and port-only host syntax.
+    const normalized = host.startsWith(":") ? `http://127.0.0.1${host}` : host.includes("://") ? host : `http://${host}`;
+    url = new URL(normalized);
+  } catch {
+    throw new TypeError("Invalid OLLAMA_URL. Configure a valid HTTPS URL or an HTTP loopback endpoint.");
+  }
+  if (url.protocol === "https:") return;
+  const hostname = url.hostname.replace(/^\[|\]$/g, "");
+  const family = isIP(hostname);
+  const loopback = hostname === "localhost" || hostname === "localhost." ||
+    (family !== 0 && loopbackAddresses.check(hostname, family === 4 ? "ipv4" : "ipv6"));
+  if (url.protocol !== "http:" || !loopback) {
+    throw new OllamaTransportError("OLLAMA_API_KEY requires HTTPS for remote servers. Use an HTTPS OLLAMA_URL; HTTP is supported only for loopback endpoints when an API key is configured.");
+  }
+}
+
+/** Reuse a bounded client only while its endpoint, connection limit and credential match. */
 function getClient(): Ollama {
   const config = getEmbeddingConfig();
   if (
     !ollamaClient ||
     ollamaClientHost !== config.ollamaUrl ||
-    ollamaClientConnections !== config.ollamaMaxConnections
+    ollamaClientConnections !== config.ollamaMaxConnections ||
+    ollamaClientApiKey !== config.ollamaApiKey
   ) {
+    assertOllamaTransport(config.ollamaUrl, config.ollamaApiKey);
     // An orphaned pool keeps its idle sockets until they time out, so close
     // the previous dispatcher whenever the client is rebuilt. close() stops
     // the old agent accepting new dispatches immediately and lets in-flight
@@ -56,16 +88,34 @@ function getClient(): Ollama {
       keepAliveMaxTimeout: 30_000,
     });
     ollamaDispatcher = dispatcher;
+    const transportDispatcher = config.ollamaApiKey
+      ? dispatcher.compose((dispatch) => (options, handler) => {
+        // Fetch dispatches redirects separately. Apply the configured transport
+        // policy before each destination receives any request content.
+        assertOllamaTransport(String(options.origin), config.ollamaApiKey);
+        return dispatch(options, handler);
+      })
+      : dispatcher;
     ollamaClient = new Ollama({
       host: config.ollamaUrl,
+      headers: config.ollamaApiKey ? { Authorization: `Bearer ${config.ollamaApiKey}` } : undefined,
       // undici's Response type predates the global one (no .bytes()), so the
       // wrapper cannot satisfy `typeof fetch` structurally; the runtime shape
       // is what the ollama client consumes and matches.
-      fetch: ((input: Parameters<typeof undiciFetch>[0], init?: Parameters<typeof undiciFetch>[1]) =>
-        undiciFetch(input, { ...init, dispatcher })) as unknown as typeof fetch,
+      fetch: (async (input: Parameters<typeof undiciFetch>[0], init?: Parameters<typeof undiciFetch>[1]) => {
+        try {
+          return await undiciFetch(input, { ...init, dispatcher: transportDispatcher });
+        } catch (error) {
+          // Preserve the actionable policy failure rather than Fetch's generic
+          // "fetch failed" message. Other transport failures keep their cause.
+          if (error instanceof TypeError && error.cause instanceof OllamaTransportError) throw error.cause;
+          throw error;
+        }
+      }) as unknown as typeof fetch,
     });
     ollamaClientHost = config.ollamaUrl;
     ollamaClientConnections = config.ollamaMaxConnections;
+    ollamaClientApiKey = config.ollamaApiKey;
   }
   return ollamaClient;
 }
@@ -76,6 +126,7 @@ export function resetOllamaClient(): void {
   ollamaClient = null;
   ollamaClientHost = null;
   ollamaClientConnections = null;
+  ollamaClientApiKey = undefined;
   ollamaDispatcher = null;
   if (previous) {
     previous.close().catch((err: unknown) => {
@@ -94,7 +145,8 @@ export async function isOllamaAvailable(): Promise<boolean> {
     const client = getClient();
     await client.list();
     return true;
-  } catch {
+  } catch (error) {
+    if (error instanceof OllamaTransportError) throw error;
     return false;
   }
 }
@@ -108,7 +160,8 @@ export async function isModelAvailable(): Promise<boolean> {
     return models.models.some(
       (m) => m.name === config.embeddingModel || m.name.startsWith(`${config.embeddingModel}:`),
     );
-  } catch {
+  } catch (error) {
+    if (error instanceof OllamaTransportError) throw error;
     return false;
   }
 }
@@ -196,7 +249,7 @@ async function detectNativeOllama(): Promise<boolean> {
     // not reachable
   }
   _autoDetectedMode = "docker";
-  _autoDetectedUrl = "http://localhost:11435";
+  _autoDetectedUrl = defaultOllamaUrl("docker", getEmbeddingConfig().ollamaApiKey);
   logger.info("Auto-mode: no native Ollama found — using managed Docker container");
   setResolvedOllamaMode(_autoDetectedMode, _autoDetectedUrl);
   return false;
@@ -227,8 +280,10 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
       config = getEmbeddingConfig();
     }
 
+    assertOllamaTransport(config.ollamaUrl, config.ollamaApiKey);
     const readinessIdentity = JSON.stringify({
       url: config.ollamaUrl,
+      apiKey: config.ollamaApiKey,
       model: config.embeddingModel,
       dimensions: config.embeddingDimensions,
     });
@@ -278,8 +333,9 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
     const client = getClient();
 
     const pullPromise = client.pull({ model });
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(
+      timeout = setTimeout(
         () => reject(new Error(
           `Embedding model download timed out after ${MODEL_PULL_TIMEOUT_MS / 60_000} minutes. ` +
           `The model '${model}' may be too large or the network is slow. Try again.`,
@@ -298,6 +354,8 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
         `Failed to download embedding model '${model}'. ` +
         `Check that the model name is correct and Ollama is responsive.\nDetails: ${msg}`,
       );
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
@@ -326,6 +384,7 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
       await detectNativeOllama();
     }
     const config = getEmbeddingConfig();
+    assertOllamaTransport(config.ollamaUrl, config.ollamaApiKey);
     const lines: string[] = [];
     const icon = (ok: boolean) => (ok ? "[OK]" : "[MISSING]");
 

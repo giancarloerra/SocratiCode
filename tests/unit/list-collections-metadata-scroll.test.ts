@@ -14,6 +14,7 @@
  * every indexed repository rather than with the number of projects.
  */
 
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 interface ScrollOptions {
@@ -258,18 +259,22 @@ describe("listCodebaseCollections metadata scroll", () => {
 
 describe("project reclamation inventory", () => {
   it("reports absent and inaccessible paths without classifying either as stale", async () => {
+    const gone = path.resolve("/gone/project");
+    const linked = path.resolve("/linked/project");
+    const canonical = path.resolve("/canonical/project");
+    const blocked = path.resolve("/blocked/project");
     metadataPoints = [
-      { id: 1, payload: { collectionName: "codebase_path-hash", projectPath: "/gone/project" } },
-      { id: 2, payload: { collectionName: "codebase_pinned", projectPath: "/linked/project" } },
-      { id: 3, payload: { collectionName: "codebase_other", projectPath: "/canonical/project" } },
-      { id: 4, payload: { collectionName: "codebase_remote", projectPath: "/blocked/project" } },
+      { id: 1, payload: { collectionName: "codebase_path-hash", projectPath: gone } },
+      { id: 2, payload: { collectionName: "codebase_pinned", projectPath: linked } },
+      { id: 3, payload: { collectionName: "codebase_other", projectPath: canonical } },
+      { id: 4, payload: { collectionName: "codebase_remote", projectPath: blocked } },
       { id: 5, payload: { collectionName: 42, projectPath: "/typed/wrong" } },
       { id: 6, payload: { collectionName: "something_else_entirely", projectPath: "/foreign/project" } },
     ];
     mockRealpath.mockImplementation(async (value: string) => {
-      if (value === "/gone/project") throw Object.assign(new Error("missing"), { code: "ENOENT" });
-      if (value === "/blocked/project") throw Object.assign(new Error("denied"), { code: "EACCES" });
-      if (value === "/linked/project" || value === "/canonical/project") return "/canonical/project";
+      if (value === gone) throw Object.assign(new Error("missing"), { code: "ENOENT" });
+      if (value === blocked) throw Object.assign(new Error("denied"), { code: "EACCES" });
+      if (value === linked || value === canonical) return canonical;
       return value;
     });
 
@@ -282,7 +287,7 @@ describe("project reclamation inventory", () => {
     expect(byIdentity.get("pinned")?.possibleSuperseded).toBe(true);
     expect(byIdentity.get("other")?.possibleSuperseded).toBe(true);
     expect(byIdentity.get("path-hash")?.metadataRecords).toEqual([
-      expect.objectContaining({ pointId: 1, collectionName: "codebase_path-hash", projectPath: "/gone/project" }),
+      expect.objectContaining({ pointId: 1, collectionName: "codebase_path-hash", projectPath: gone }),
     ]);
     // Each unattributable point is returned with what a person needs to find it, never inferred into an identity.
     expect(inventory.unrecognisedMetadata).toEqual([

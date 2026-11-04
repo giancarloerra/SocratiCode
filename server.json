@@ -67,7 +67,7 @@
         },
         {
           "name": "OLLAMA_API_KEY",
-          "description": "Optional API key for authenticated Ollama proxies",
+          "description": "Optional API key for authenticated Ollama proxies. Remote endpoints require HTTPS; loopback HTTP is supported.",
           "isRequired": false,
           "format": "string",
           "isSecret": true

@@ -11,10 +11,12 @@
  * JSON-RPC to it, the way an MCP host does.
  */
 
-import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, type ExecFileException, execFile, spawn } from "node:child_process";
 import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { createInterface } from "node:readline";
+import { promisify } from "node:util";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 interface RpcMessage {
@@ -28,19 +30,120 @@ interface RpcMessage {
 
 /** Nothing listens here, so external Qdrant readiness fails without touching a real server. */
 const UNREACHABLE = "http://127.0.0.1:9";
+const execFileAsync = promisify(execFile);
 
 let child: ChildProcessWithoutNullStreams | undefined;
+let childClosed: Promise<void> | undefined;
 let workDir = "";
 
 beforeEach(async () => {
   workDir = await fsp.mkdtemp(path.join(os.tmpdir(), "socraticode-logging-protocol-"));
 });
 
-afterEach(async () => {
-  child?.kill("SIGKILL");
+interface WindowsProcess {
+  ProcessId: number;
+  ParentProcessId: number;
+  CreationDate: string;
+}
+
+/** Allow bounded PowerShell/CIM startup and retain identities so reused PIDs are not cleanup targets. */
+async function windowsProcesses(): Promise<WindowsProcess[]> {
+  const started = Date.now();
+  const { stdout } = await execFileAsync("powershell.exe", [
+    "-NoProfile", "-NonInteractive", "-Command",
+    "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress",
+  ], { timeout: 30_000 }).catch((cause) => {
+    const failure = cause as ExecFileException & { stdout?: string; stderr?: string };
+    const details = { code: failure.code, signal: failure.signal, killed: failure.killed, stdoutBytes: Buffer.byteLength(failure.stdout ?? ""), stderr: failure.stderr };
+    throw new Error(`Windows process lookup failed after ${Date.now() - started}ms: ${JSON.stringify(details)}`, { cause });
+  });
+  return JSON.parse(stdout);
+}
+
+/** Close the server before deleting its files; fail explicitly if shutdown needs forced termination. */
+async function stopServer(
+  timeoutMs = 15_000,
+  beforeForcedTermination?: () => Promise<void>,
+  lookup = process.platform === "win32" ? windowsProcesses : undefined,
+): Promise<void> {
+  const proc = child;
+  const windowsPids = lookup && proc?.pid !== undefined ? [proc.pid] : [];
+  let windowsSnapshot: WindowsProcess[] | undefined;
+  let lookupError: Error | undefined;
+  if (lookup && windowsPids.length) {
+    try {
+      windowsSnapshot = await lookup();
+      // Retain descendants before EOF can make their wrapper exit.
+      for (const parent of windowsPids) {
+        for (const entry of windowsSnapshot) {
+          if (entry.ParentProcessId === parent && !windowsPids.includes(entry.ProcessId)) windowsPids.push(entry.ProcessId);
+        }
+      }
+    } catch (cause) {
+      lookupError = cause instanceof Error ? cause : new Error("Windows process lookup failed", { cause });
+    }
+  }
+  let shutdownTimedOut = false;
+  if (proc && proc.exitCode === null && proc.signalCode === null) {
+    // EOF reaches the server through the tsx wrapper; wait for its streams
+    // to close before removing a directory the server can still log into.
+    proc.stdin.end();
+  }
+  if (proc && childClosed) {
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      shutdownTimedOut = await Promise.race([
+        childClosed.then(() => false),
+        new Promise<true>((resolve) => { timeout = setTimeout(() => resolve(true), timeoutMs); }),
+      ]);
+      if (shutdownTimedOut && proc.pid !== undefined) {
+        if (beforeForcedTermination) await beforeForcedTermination();
+        if (lookup) {
+          if (!windowsSnapshot) {
+            throw new Error(`MCP logging server did not close within ${timeoutMs} milliseconds after stdin EOF; Windows process identities could not be verified for forced termination; temporary files were retained.`, { cause: lookupError });
+          }
+          const currentProcesses = await lookup();
+          for (const pid of windowsPids.reverse()) {
+            if (pid === proc.pid && (proc.exitCode !== null || proc.signalCode !== null)) continue;
+            const original = windowsSnapshot.find((entry) => entry.ProcessId === pid);
+            if (!original || !currentProcesses.some((entry) => entry.ProcessId === pid && entry.CreationDate === original.CreationDate)) continue;
+            try {
+              await execFileAsync("taskkill", ["/pid", String(pid), "/t", "/f"], { timeout: 10_000 });
+            } catch (error) {
+              try {
+                process.kill(pid, 0);
+              } catch (probeError) {
+                if (probeError instanceof Error && "code" in probeError && probeError.code === "ESRCH") continue;
+              }
+              throw error;
+            }
+          }
+        } else {
+          try {
+            process.kill(-proc.pid, "SIGKILL");
+          } catch (error) {
+            if (!(error instanceof Error) || !("code" in error) || error.code !== "ESRCH") throw error;
+          }
+        }
+        clearTimeout(timeout);
+        const streamsClosed = await Promise.race([
+          childClosed.then(() => true),
+          new Promise<false>((resolve) => { timeout = setTimeout(() => resolve(false), 10_000); }),
+        ]);
+        if (!streamsClosed) throw new Error("MCP logging server streams did not close within 10000 milliseconds after forced termination; temporary files were retained.");
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
   child = undefined;
+  childClosed = undefined;
   await fsp.rm(workDir, { recursive: true, force: true });
-});
+  if (lookupError) throw lookupError;
+  if (shutdownTimedOut) throw new Error(`MCP logging server did not close within ${timeoutMs} milliseconds after stdin EOF; its process tree was terminated.`);
+}
+
+afterEach(() => stopServer());
 
 /** Start the server from source over stdio, isolated from the caller's configuration. */
 function startServer(logFile: string) {
@@ -59,12 +162,14 @@ function startServer(logFile: string) {
     SOCRATICODE_LOG_FILE: logFile,
   });
 
-  const proc = spawn(process.execPath, ["--import", "tsx", path.resolve("src/index.ts")], {
+  const proc = spawn(process.execPath, [path.resolve("node_modules/tsx/dist/cli.mjs"), path.resolve("src/index.ts")], {
     cwd: path.resolve("."),
     env,
     stdio: ["pipe", "pipe", "pipe"],
+    detached: process.platform !== "win32",
   });
   child = proc;
+  childClosed = new Promise<void>((resolve) => proc.once("close", () => resolve()));
 
   const received: RpcMessage[] = [];
   let stderr = "";
@@ -143,6 +248,100 @@ async function waitFor(check: () => boolean, timeoutMs: number, failed: () => Er
 const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
 
 describe("MCP logging over stdio", () => {
+  it.each(["closes", "stalls"] as const)("still sends EOF when Windows process lookup fails and the child %s", async (behaviour) => {
+    const script = `process.stdin.resume(); ${behaviour === "stalls" ? "setInterval(() => {}, 1000);" : ""} process.stdout.write("ready");`;
+    const proc = spawn(process.execPath, ["-e", script], { stdio: "pipe", detached: process.platform !== "win32" });
+    child = proc;
+    const closed = new Promise<void>((resolve) => proc.once("close", () => resolve()));
+    childClosed = closed;
+    const lookupFailure = new Error("Windows process lookup failed");
+    const failedLookup = async (): Promise<WindowsProcess[]> => { throw lookupFailure; };
+    try {
+      await new Promise<void>((resolve) => proc.stdout.once("data", () => resolve()));
+      if (behaviour === "closes") {
+        await expect(stopServer(5_000, undefined, failedLookup)).rejects.toBe(lookupFailure);
+        expect(child).toBeUndefined();
+        await expect(fsp.stat(workDir)).rejects.toMatchObject({ code: "ENOENT" });
+      } else {
+        await expect(stopServer(100, undefined, failedLookup)).rejects.toMatchObject({
+          cause: lookupFailure, message: expect.stringContaining("temporary files were retained"),
+        });
+        expect(proc.stdin.writableEnded).toBe(true);
+        expect(proc.exitCode).toBeNull();
+        expect((await fsp.stat(workDir)).isDirectory()).toBe(true);
+      }
+    } finally {
+      if (proc.exitCode === null && proc.signalCode === null) proc.kill();
+      await closed;
+      child = undefined;
+      childClosed = undefined;
+    }
+  });
+
+  it.each(["exit", "close", "exit before EOF"] as const)("cleans up and retains the timeout error when %s precedes forced termination", async (event) => {
+    // Windows otherwise ends the child with its parent's job instead of retaining the pipes.
+    const descendantScript = "setInterval(() => {}, 1000); process.stdout.write(String(process.pid) + '\\n');";
+    const descendant = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(descendantScript)}], { detached: process.platform === 'win32', stdio: ['ignore', 'inherit', 'inherit'] }).unref(); `;
+    const script = `${event !== "close" ? descendant : "process.stdout.write('ready\\n');"}process.stdin.resume(); setInterval(() => {}, 1000);`;
+    const proc = spawn(process.execPath, ["-e", script], {
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    });
+    child = proc;
+    const exited = new Promise<void>((resolve) => proc.once("exit", () => resolve()));
+    const closed = new Promise<void>((resolve) => proc.once("close", () => resolve()));
+    childClosed = closed;
+    proc.stderr.resume();
+    const descendantPid = await new Promise<number>((resolve) => {
+      createInterface({ input: proc.stdout }).once("line", (line) => resolve(Number(line)));
+    });
+
+    let terminationStarted = false;
+    if (event === "exit before EOF") {
+      proc.kill();
+      await exited;
+    }
+    try {
+      await expect(stopServer(100, async () => {
+        terminationStarted = true;
+        proc.kill();
+        await (event !== "close" ? exited : closed);
+      })).rejects.toThrow("process tree was terminated");
+      expect(terminationStarted).toBe(true);
+      expect(child).toBeUndefined();
+      expect(childClosed).toBeUndefined();
+      await expect(fsp.stat(workDir)).rejects.toMatchObject({ code: "ENOENT" });
+    } catch (error) {
+      // A failed cleanup assertion must not leave the persistent fixture behind.
+      if (Number.isInteger(descendantPid) && descendantPid > 0) {
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch (cleanupError) {
+          if (!(cleanupError instanceof Error) || !("code" in cleanupError) || cleanupError.code !== "ESRCH") {
+            throw new AggregateError([error, cleanupError], "Cleanup assertion and fixture termination both failed");
+          }
+        }
+      }
+      throw error;
+    }
+  });
+
+  it("fails and removes the whole process tree when EOF shutdown stalls", async () => {
+    const descendant = "process.stdin.resume(); process.stdout.write('ready'); setInterval(() => {}, 1000);";
+    const wrapper = `require('node:child_process').spawn(process.execPath, ['-e', ${JSON.stringify(descendant)}], { stdio: ['pipe', 'inherit', 'inherit'] }); process.stdin.resume(); setInterval(() => {}, 1000);`;
+    const proc = spawn(process.execPath, ["-e", wrapper], {
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    });
+    child = proc;
+    childClosed = new Promise<void>((resolve) => proc.once("close", () => resolve()));
+    proc.stderr.resume();
+    await new Promise<void>((resolve) => proc.stdout.once("data", () => resolve()));
+
+    await expect(stopServer(100)).rejects.toThrow("process tree was terminated");
+    await expect(fsp.stat(workDir)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("advertises logging, accepts logging/setLevel, and delivers one notification per log line", async () => {
     const logFile = path.join(workDir, "server.log");
     const server = startServer(logFile);

@@ -10,9 +10,14 @@ By submitting a pull request, you agree to the [Contributor License Agreement (C
 
 ### Prerequisites
 
-- Node.js 18.17 or newer
+- Node.js 18.17 or newer for the server runtime
+- Node.js 20.19 or newer in 20.x, 22.12 or newer in 22.x, or 24 and newer for tests
+- Node.js 22 or newer for extension packaging
 - Docker (for integration and E2E tests)
 - Git
+
+Release tools require Node.js 22.22.2 or newer in the 22.x line, 24.15 or newer
+in the 24.x line, or 26 and newer.
 
 ### Setup
 

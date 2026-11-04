@@ -39,6 +39,69 @@ jobs:
       - run: npm ci
       - run: npm run test:unit
 
+  platform-compatibility:
+    name: Platform Compatibility
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-15-intel]
+        # Server compatibility includes runtimes outside the development tools'
+        # declared engine range. Keep every supported server major covered.
+        node-version: ["18.17.0", "18", "19", "20", "21", "22", "23", "24", "25", "26"]
+        exclude:
+          # These Linux cells already run in the required unit-tests job.
+          - os: ubuntu-latest
+            node-version: "18"
+          - os: ubuntu-latest
+            node-version: "20"
+          - os: ubuntu-latest
+            node-version: "22"
+          - os: ubuntu-latest
+            node-version: "26"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+      - run: npm ci
+      - run: npm run test:unit
+
+  platform-consumer-install:
+    name: Platform Node 18.17 Consumer Install
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 18.17.0
+          cache: npm
+      - run: npm ci
+      - name: Verify production installation at the Node floor
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm run build
+          consumer_dir="$(mktemp -d)"
+          npm pack --pack-destination "$consumer_dir"
+          package_file="$(find "$consumer_dir" -maxdepth 1 -type f -name 'socraticode-*.tgz' -print -quit)"
+          test -n "$package_file"
+          cd "$consumer_dir"
+          npm init --yes
+          npm install --engine-strict --omit=dev "$package_file"
+          test -f node_modules/socraticode/dist/index.js
+          SOCRATICODE_AUTO_RESUME=off SOCRATICODE_AUTO_CLEANUP=off \
+            node node_modules/socraticode/dist/index.js < /dev/null
+
   git-refresh-windows:
     name: Git Refresh on Windows
     runs-on: windows-latest
@@ -50,11 +113,76 @@ jobs:
           cache: npm
       - run: npm ci
       - run: git --version
-      - run: npx vitest run tests/unit/git-state.test.ts tests/unit/git-refresh.test.ts tests/unit/git-lock.test.ts tests/unit/local-index-ownership.test.ts
+      - run: npx vitest run tests/unit/git-state.test.ts tests/unit/git-refresh.test.ts tests/unit/git-lock.test.ts tests/unit/local-index-ownership.test.ts tests/unit/mcp-logging-protocol.test.ts
       - name: Verify JVM source-set resolution on Windows
         run: npx vitest run tests/unit/graph-resolution.test.ts -t "JVM multi-module resolution"
       - name: Verify TS/JS monorepo resolution on Windows
         run: npx vitest run tests/unit/graph-typescript.test.ts
+
+  managed-services-integration:
+    name: Fresh Managed Services and Integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      QDRANT_MODE: managed
+      EMBEDDING_PROVIDER: ollama
+      OLLAMA_MODE: docker
+      OLLAMA_URL: http://127.0.0.1:11435
+      SOCRATICODE_AUTO_RESUME: "off"
+      REQUIRE_QDRANT: "1"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Verify required executables
+        run: |
+          docker info
+          rustc --version
+          cargo --version
+      - name: Cold-start managed services with automatic Ollama selection
+        env:
+          OLLAMA_MODE: auto
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { execFileSync } from "node:child_process";
+          import { OLLAMA_CONTAINER_NAME, OLLAMA_IMAGE, QDRANT_CONTAINER_NAME, QDRANT_IMAGE } from "./dist/constants.js";
+          import { ensureQdrantReady } from "./dist/services/docker.js";
+          import { ensureOllamaReady } from "./dist/services/ollama.js";
+
+          const list = (...args) => execFileSync("docker", args, { encoding: "utf8" }).trim().split("\n");
+          const containers = list("ps", "-a", "--format", "{{.Names}}");
+          const images = list("image", "ls", "--format", "{{.Repository}}:{{.Tag}}");
+          const volumes = list("volume", "ls", "--format", "{{.Name}}");
+          for (const name of [QDRANT_CONTAINER_NAME, OLLAMA_CONTAINER_NAME]) assert(!containers.includes(name));
+          for (const image of [QDRANT_IMAGE, OLLAMA_IMAGE]) assert(!images.includes(image));
+          for (const volume of ["socraticode_qdrant_data", "socraticode_ollama_data"]) assert(!volumes.includes(volume));
+
+          assert.deepEqual(await ensureQdrantReady(), { started: true, pulled: true });
+          assert.deepEqual(await ensureOllamaReady(), { containerStarted: true, imagePulled: true, modelPulled: true });
+          assert.deepEqual(await ensureQdrantReady(), { started: false, pulled: false });
+          assert.deepEqual(await ensureOllamaReady(), { containerStarted: false, imagePulled: false, modelPulled: false });
+          console.log("Fresh image pulls, container startup, model download and repeated readiness passed.");
+          NODE
+      - name: Run complete managed integration and E2E suites
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/socraticode-ci"
+          report_file="$RUNNER_TEMP/socraticode-ci/managed-integration.json"
+          npx vitest run tests/integration/ tests/e2e/ --reporter=default --reporter=json --outputFile="$report_file"
+          node --input-type=module - "$report_file" <<'NODE'
+          import assert from "node:assert/strict";
+          import { readFileSync } from "node:fs";
+          const report = JSON.parse(readFileSync(process.argv[2], "utf8"));
+          assert.equal(report.numPendingTests, 0, "Required integration cases must execute");
+          console.log(JSON.stringify({ passed: report.numPassedTests, skipped: report.numPendingTests }));
+          NODE
 
   git-refresh-integration:
     name: Git Refresh with Qdrant and Ollama

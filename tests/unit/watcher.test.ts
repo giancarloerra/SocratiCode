@@ -489,7 +489,7 @@ describe("watcher (unit)", () => {
       let root: string;
       const filterOf = (excluded: (relative: string) => boolean, roots: string[] = []) => ({
         ignores: excluded,
-        isEnvironmentRoot: (relative: string) => roots.includes(relative.replace(/\/$/, "")),
+        isEnvironmentRoot: (relative: string) => roots.includes(relative.split(path.sep).join("/").replace(/\/$/, "")),
       });
       const underEnv = (relative: string) =>
         relative === "backend/env" || relative.startsWith("backend/env/");
@@ -497,7 +497,7 @@ describe("watcher (unit)", () => {
 
       beforeEach(() => {
         root = fs.mkdtempSync(path.join(os.tmpdir(), "socraticode-watch-env-"));
-        vi.mocked(shouldIgnore).mockImplementation((ig, relative) => ig.ignores(relative));
+        vi.mocked(shouldIgnore).mockImplementation((ig, relative) => ig.ignores(relative.split(path.sep).join("/")));
       });
 
       afterEach(async () => {

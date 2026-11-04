@@ -18,6 +18,12 @@ async function getInfraStatusSummary(): Promise<string[]> {
       const endpoint = QDRANT_URL ?? `http://${QDRANT_HOST}:${QDRANT_PORT}`;
       try {
         await listCodebaseCollections(); // throws if unreachable
+      } catch {
+        lines.push(`Infrastructure: ❌ Cannot reach external Qdrant at ${endpoint}`);
+        lines.push("  Check QDRANT_URL / QDRANT_HOST and make sure the server is running.");
+        return lines;
+      }
+      try {
         const provider = await getEmbeddingProvider();
         const health = await provider.healthCheck();
         if (health.available) {
@@ -25,9 +31,9 @@ async function getInfraStatusSummary(): Promise<string[]> {
         } else {
           lines.push(`Infrastructure: ⚠️ External Qdrant reachable (${endpoint}), but ${config.embeddingProvider} embeddings not ready`);
         }
-      } catch {
-        lines.push(`Infrastructure: ❌ Cannot reach external Qdrant at ${endpoint}`);
-        lines.push("  Check QDRANT_URL / QDRANT_HOST and make sure the server is running.");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        lines.push(`Infrastructure: ❌ External Qdrant reachable (${endpoint}), but ${config.embeddingProvider} provider check failed: ${message}`);
       }
     } else {
       const docker = await isDockerAvailable();
@@ -37,16 +43,21 @@ async function getInfraStatusSummary(): Promise<string[]> {
         return lines;
       }
       const qdrant = await isQdrantRunning();
-      const provider = await getEmbeddingProvider();
-      const health = await provider.healthCheck();
-      if (qdrant && health.available) {
-        lines.push(`Infrastructure: ✅ All services running (Docker, Qdrant, ${config.embeddingProvider} embeddings)`);
-      } else {
-        const missing: string[] = [];
-        if (!qdrant) missing.push("Qdrant");
-        if (!health.available) missing.push(`${config.embeddingProvider} embeddings`);
-        lines.push(`Infrastructure: ⚠️ Docker OK, but ${missing.join(" and ")} not running`);
-        lines.push("  Run codebase_index or codebase_health to auto-start services.");
+      try {
+        const provider = await getEmbeddingProvider();
+        const health = await provider.healthCheck();
+        if (qdrant && health.available) {
+          lines.push(`Infrastructure: ✅ All services running (Docker, Qdrant, ${config.embeddingProvider} embeddings)`);
+        } else {
+          const missing: string[] = [];
+          if (!qdrant) missing.push("Qdrant");
+          if (!health.available) missing.push(`${config.embeddingProvider} embeddings`);
+          lines.push(`Infrastructure: ⚠️ Docker OK, but ${missing.join(" and ")} not running`);
+          lines.push("  Run codebase_index or codebase_health to auto-start services.");
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        lines.push(`Infrastructure: ❌ Docker OK, Qdrant ${qdrant ? "running" : "not running"}; ${config.embeddingProvider} provider check failed: ${message}`);
       }
     }
   } catch {
@@ -110,9 +121,14 @@ export async function handleManageTool(
       // Embedding provider health check (works for ollama, openai, google)
       lines.push("");
       lines.push(`Embedding provider: ${config.embeddingProvider}`);
-      const provider = await getEmbeddingProvider();
-      const health = await provider.healthCheck();
-      lines.push(...health.statusLines);
+      try {
+        const provider = await getEmbeddingProvider();
+        const health = await provider.healthCheck();
+        lines.push(...health.statusLines);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        lines.push(`${icon(false)} Embedding provider check failed: ${message}`);
+      }
 
       lines.push("");
       if (QDRANT_MODE === "external") {

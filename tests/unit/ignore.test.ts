@@ -213,30 +213,34 @@ describe("ignore", () => {
     // its marker (review finding) while the other five happened to work. One
     // case per character the old helper claimed to cover — and a neighbour the
     // wildcard reading would have matched, to show the compare is literal.
-    it.each([
+    for (const [symbol, name, neighbour] of [
       ["?", "env?", "envx"],
       ["*", "env*", "envxyz"],
       ["[]", "env[3]", "env3"],
       ["!", "!env", "env"],
       ["#", "#env", "env"],
       ["\\", "env\\x", "envx"],
-    ])("matches an environment directory whose name carries %s literally", (_, name, neighbour) => {
-      fixture = createFixtureProject("ignore-venv-metacharacter");
-      fs.mkdirSync(path.join(fixture.root, "sub", name, "lib"), { recursive: true });
-      fs.writeFileSync(
-        path.join(fixture.root, "sub", name, "pyvenv.cfg"),
-        "home = /usr\nversion = 3.12.0\n",
-      );
-      fs.mkdirSync(path.join(fixture.root, "sub", neighbour), { recursive: true });
+    ]) {
+      // Windows cannot create these literal directory names:
+      // https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file
+      it.skipIf(process.platform === "win32" && /[?*\\]/.test(name))(`matches an environment directory whose name carries ${symbol} literally`, () => {
+        fixture = createFixtureProject("ignore-venv-metacharacter");
+        fs.mkdirSync(path.join(fixture.root, "sub", name, "lib"), { recursive: true });
+        fs.writeFileSync(
+          path.join(fixture.root, "sub", name, "pyvenv.cfg"),
+          "home = /usr\nversion = 3.12.0\n",
+        );
+        fs.mkdirSync(path.join(fixture.root, "sub", neighbour), { recursive: true });
 
-      const ig = createIgnoreFilter(fixture.root);
-      expect(shouldIgnore(ig, `sub/${name}/lib/dep.py`)).toBe(true);
-      expect(shouldIgnore(ig, `sub/${name}/`)).toBe(true);
-      expect(shouldIgnore(ig, `sub/${neighbour}/main.py`)).toBe(false);
-      // A directory whose name merely begins with the environment's is not
-      // beneath it.
-      expect(shouldIgnore(ig, `sub/${name}.d/main.py`)).toBe(false);
-    });
+        const ig = createIgnoreFilter(fixture.root);
+        expect(shouldIgnore(ig, `sub/${name}/lib/dep.py`)).toBe(true);
+        expect(shouldIgnore(ig, `sub/${name}/`)).toBe(true);
+        expect(shouldIgnore(ig, `sub/${neighbour}/main.py`)).toBe(false);
+        // A directory whose name merely begins with the environment's is not
+        // beneath it.
+        expect(shouldIgnore(ig, `sub/${name}.d/main.py`)).toBe(false);
+      });
+    }
 
     it("keeps a nested module named env, which carries no pyvenv.cfg", () => {
       // The case the anchoring exists for: in Rust `env` is an ordinary module
