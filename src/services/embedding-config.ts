@@ -72,6 +72,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { OLLAMA_PORT } from "../constants.js";
 import { logger } from "./logger.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -129,12 +130,11 @@ const PROVIDER_DEFAULTS: Record<EmbeddingProvider, { model: string; dimensions: 
 
 // ── Ollama mode defaults ──────────────────────────────────────────────────
 
-const MODE_DEFAULTS: Record<OllamaMode, { url: string }> = {
-  docker: { url: "http://localhost:11435" },
-  external: { url: "http://localhost:11434" },
-  // auto: probe localhost:11434 first; URL will be corrected by OllamaEmbeddingProvider.ensureReady()
-  auto: { url: "http://localhost:11434" },
-};
+/** Authenticated Docker requests use the port published by the managed container. */
+export function defaultOllamaUrl(mode: OllamaMode, apiKey: string | undefined): string {
+  if (mode === "docker") return `http://localhost:${apiKey ? OLLAMA_PORT : 11435}`;
+  return "http://localhost:11434";
+}
 
 /**
  * Well-known model context lengths (in tokens).
@@ -343,10 +343,9 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
       `Invalid OLLAMA_MODE: "${rawMode}". Must be "docker", "external", or "auto".`,
     );
   }
-  const ollamaUrl = process.env.OLLAMA_URL;
   const ollamaApiKey = process.env.OLLAMA_API_KEY || undefined;
+  const ollamaUrl = process.env.OLLAMA_URL || (ollamaApiKey ? process.env.OLLAMA_HOST : undefined);
   const ollamaMode: OllamaMode = rawMode === "auto" && ollamaUrl && ollamaApiKey ? "external" : rawMode;
-  const modeDefaults = MODE_DEFAULTS[ollamaMode];
 
   // ── Model & dimensions (provider-specific defaults) ─────────────────
   const embeddingModel = process.env.EMBEDDING_MODEL || providerDefaults.model;
@@ -384,7 +383,7 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
   _config = {
     embeddingProvider,
     ollamaMode,
-    ollamaUrl: ollamaUrl || modeDefaults.url,
+    ollamaUrl: ollamaUrl || defaultOllamaUrl(ollamaMode, ollamaApiKey),
     lmstudioUrl: process.env.LMSTUDIO_URL || "http://localhost:1234/v1",
     litellmUrl: process.env.LITELLM_URL || "http://localhost:4000/v1",
     allowMissingModelListing: parseBooleanEnv(

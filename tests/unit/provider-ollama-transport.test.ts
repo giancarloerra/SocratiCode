@@ -1,10 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as docker from "../../src/services/docker.js";
 import { resetEmbeddingConfig } from "../../src/services/embedding-config.js";
 import { OllamaEmbeddingProvider, resetAutoDetectionCache, resetOllamaClient, resetOllamaReadinessCache } from "../../src/services/provider-ollama.js";
 
 const sdk = vi.hoisted(() => ({ constructed: vi.fn() }));
+vi.mock("../../src/constants.js", async (original) => ({
+  ...await original<typeof import("../../src/constants.js")>(), OLLAMA_PORT: 15678,
+}));
 vi.mock("ollama", () => ({
   Ollama: class {
     constructor(options: unknown) {
@@ -43,6 +47,7 @@ describe("Ollama API-key transport", () => {
   it.each(["ensureReady", "healthCheck"] as const)("uses the configured keyed server during %s in default auto mode", async (method) => {
     delete process.env.OLLAMA_MODE;
     process.env.OLLAMA_URL = "https://ollama.example:11434";
+    process.env.OLLAMA_HOST = "https://alternate.example:11434";
     const discover = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", discover);
 
@@ -55,10 +60,28 @@ describe("Ollama API-key transport", () => {
     expect(discover).not.toHaveBeenCalled();
   });
 
-  it("still discovers native Ollama in auto mode without a key", async () => {
+  it.each(["auto", "external"])("uses the keyed OLLAMA_HOST when OLLAMA_URL is absent in %s mode", async (mode) => {
+    process.env.OLLAMA_MODE = mode;
+    delete process.env.OLLAMA_URL;
+    process.env.OLLAMA_HOST = "https://alternate.example:11434";
+    const discover = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", discover);
+
+    await new OllamaEmbeddingProvider().healthCheck();
+
+    expect(sdk.constructed).toHaveBeenCalledWith(expect.objectContaining({
+      host: "https://alternate.example:11434",
+      headers: { Authorization: "Bearer fixture-transport-key" },
+    }));
+    expect(discover).not.toHaveBeenCalled();
+  });
+
+  it.each(["OLLAMA_URL", "OLLAMA_HOST"])("still discovers native Ollama in auto mode with %s and no key", async (setting) => {
     delete process.env.OLLAMA_MODE;
     delete process.env.OLLAMA_API_KEY;
-    process.env.OLLAMA_URL = "https://ollama.example:11434";
+    delete process.env.OLLAMA_URL;
+    delete process.env.OLLAMA_HOST;
+    process.env[setting] = "https://ollama.example:11434";
     const discover = vi.fn().mockResolvedValue({ ok: true });
     vi.stubGlobal("fetch", discover);
 
@@ -68,6 +91,24 @@ describe("Ollama API-key transport", () => {
     expect(sdk.constructed).toHaveBeenCalledWith(expect.objectContaining({
       host: "http://localhost:11434", headers: undefined,
     }));
+  });
+
+  it.each(["docker", "auto"])("sends managed Ollama credentials to the configured container port in %s mode", async (mode) => {
+    process.env.OLLAMA_MODE = mode;
+    delete process.env.OLLAMA_URL;
+    delete process.env.OLLAMA_HOST;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false }));
+    const available = vi.spyOn(docker, "isDockerAvailable").mockResolvedValue(false);
+    try {
+      const provider = new OllamaEmbeddingProvider();
+      await provider.healthCheck();
+      await provider.embed(["transport fixture"]);
+      expect(sdk.constructed).toHaveBeenCalledWith(expect.objectContaining({
+        host: "http://localhost:15678", headers: { Authorization: "Bearer fixture-transport-key" },
+      }));
+    } finally {
+      available.mockRestore();
+    }
   });
 
   it.each([

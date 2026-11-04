@@ -12,7 +12,7 @@ import { Ollama } from "ollama";
 import { Agent, fetch as undiciFetch } from "undici";
 import type { InfraProgressCallback } from "./docker.js";
 import { ensureOllamaContainerReady, isDockerAvailable, isOllamaImagePresent, isOllamaRunning, isQdrantRunning } from "./docker.js";
-import { getEmbeddingConfig, setResolvedOllamaMode } from "./embedding-config.js";
+import { defaultOllamaUrl, getEmbeddingConfig, setResolvedOllamaMode } from "./embedding-config.js";
 import type { EmbeddingHealthStatus, EmbeddingProvider, EmbeddingReadinessResult } from "./embedding-types.js";
 import { logger } from "./logger.js";
 
@@ -249,7 +249,7 @@ async function detectNativeOllama(): Promise<boolean> {
     // not reachable
   }
   _autoDetectedMode = "docker";
-  _autoDetectedUrl = "http://localhost:11435";
+  _autoDetectedUrl = defaultOllamaUrl("docker", getEmbeddingConfig().ollamaApiKey);
   logger.info("Auto-mode: no native Ollama found — using managed Docker container");
   setResolvedOllamaMode(_autoDetectedMode, _autoDetectedUrl);
   return false;

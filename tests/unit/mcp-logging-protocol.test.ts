@@ -61,14 +61,26 @@ async function windowsProcesses(): Promise<WindowsProcess[]> {
 }
 
 /** Close the server before deleting its files; fail explicitly if shutdown needs forced termination. */
-async function stopServer(timeoutMs = 15_000, beforeForcedTermination?: () => Promise<void>): Promise<void> {
+async function stopServer(
+  timeoutMs = 15_000,
+  beforeForcedTermination?: () => Promise<void>,
+  lookup = process.platform === "win32" ? windowsProcesses : undefined,
+): Promise<void> {
   const proc = child;
-  const windowsPids = process.platform === "win32" && proc?.pid !== undefined ? [proc.pid] : [];
-  const windowsSnapshot = windowsPids.length ? await windowsProcesses() : [];
-  // Retain descendants before EOF can make their wrapper exit.
-  for (const parent of windowsPids) {
-    for (const entry of windowsSnapshot) {
-      if (entry.ParentProcessId === parent && !windowsPids.includes(entry.ProcessId)) windowsPids.push(entry.ProcessId);
+  const windowsPids = lookup && proc?.pid !== undefined ? [proc.pid] : [];
+  let windowsSnapshot: WindowsProcess[] | undefined;
+  let lookupError: Error | undefined;
+  if (lookup && windowsPids.length) {
+    try {
+      windowsSnapshot = await lookup();
+      // Retain descendants before EOF can make their wrapper exit.
+      for (const parent of windowsPids) {
+        for (const entry of windowsSnapshot) {
+          if (entry.ParentProcessId === parent && !windowsPids.includes(entry.ProcessId)) windowsPids.push(entry.ProcessId);
+        }
+      }
+    } catch (cause) {
+      lookupError = cause instanceof Error ? cause : new Error("Windows process lookup failed", { cause });
     }
   }
   let shutdownTimedOut = false;
@@ -86,8 +98,11 @@ async function stopServer(timeoutMs = 15_000, beforeForcedTermination?: () => Pr
       ]);
       if (shutdownTimedOut && proc.pid !== undefined) {
         if (beforeForcedTermination) await beforeForcedTermination();
-        if (process.platform === "win32") {
-          const currentProcesses = await windowsProcesses();
+        if (lookup) {
+          if (!windowsSnapshot) {
+            throw new Error(`MCP logging server did not close within ${timeoutMs} milliseconds after stdin EOF; Windows process identities could not be verified for forced termination; temporary files were retained.`, { cause: lookupError });
+          }
+          const currentProcesses = await lookup();
           for (const pid of windowsPids.reverse()) {
             if (pid === proc.pid && (proc.exitCode !== null || proc.signalCode !== null)) continue;
             const original = windowsSnapshot.find((entry) => entry.ProcessId === pid);
@@ -124,6 +139,7 @@ async function stopServer(timeoutMs = 15_000, beforeForcedTermination?: () => Pr
   child = undefined;
   childClosed = undefined;
   await fsp.rm(workDir, { recursive: true, force: true });
+  if (lookupError) throw lookupError;
   if (shutdownTimedOut) throw new Error(`MCP logging server did not close within ${timeoutMs} milliseconds after stdin EOF; its process tree was terminated.`);
 }
 
@@ -232,6 +248,36 @@ async function waitFor(check: () => boolean, timeoutMs: number, failed: () => Er
 const occurrences = (text: string, needle: string): number => text.split(needle).length - 1;
 
 describe("MCP logging over stdio", () => {
+  it.each(["closes", "stalls"] as const)("still sends EOF when Windows process lookup fails and the child %s", async (behaviour) => {
+    const script = `process.stdin.resume(); ${behaviour === "stalls" ? "setInterval(() => {}, 1000);" : ""} process.stdout.write("ready");`;
+    const proc = spawn(process.execPath, ["-e", script], { stdio: "pipe", detached: process.platform !== "win32" });
+    child = proc;
+    const closed = new Promise<void>((resolve) => proc.once("close", () => resolve()));
+    childClosed = closed;
+    const lookupFailure = new Error("Windows process lookup failed");
+    const failedLookup = async (): Promise<WindowsProcess[]> => { throw lookupFailure; };
+    try {
+      await new Promise<void>((resolve) => proc.stdout.once("data", () => resolve()));
+      if (behaviour === "closes") {
+        await expect(stopServer(5_000, undefined, failedLookup)).rejects.toBe(lookupFailure);
+        expect(child).toBeUndefined();
+        await expect(fsp.stat(workDir)).rejects.toMatchObject({ code: "ENOENT" });
+      } else {
+        await expect(stopServer(100, undefined, failedLookup)).rejects.toMatchObject({
+          cause: lookupFailure, message: expect.stringContaining("temporary files were retained"),
+        });
+        expect(proc.stdin.writableEnded).toBe(true);
+        expect(proc.exitCode).toBeNull();
+        expect((await fsp.stat(workDir)).isDirectory()).toBe(true);
+      }
+    } finally {
+      if (proc.exitCode === null && proc.signalCode === null) proc.kill();
+      await closed;
+      child = undefined;
+      childClosed = undefined;
+    }
+  });
+
   it.each(["exit", "close", "exit before EOF"] as const)("cleans up and retains the timeout error when %s precedes forced termination", async (event) => {
     // Windows otherwise ends the child with its parent's job instead of retaining the pipes.
     const descendantScript = "setInterval(() => {}, 1000); process.stdout.write(String(process.pid) + '\\n');";

@@ -1545,8 +1545,8 @@ Code and context collections persist the settings that define their stored repre
 | `OLLAMA_MODE` | `auto` | `auto` = use native Ollama on port 11434 if available, otherwise manage a Docker container (recommended). `docker` = always use managed Docker container on port 11435. `external` = user-managed Ollama instance (native, remote, etc.) |
 | `OLLAMA_URL` | `http://localhost:11434` (auto/external) / `http://localhost:11435` (docker) | Full Ollama API endpoint |
 | `OLLAMA_PORT` | `11435` | Ollama container port (Docker mode). Ignored when `OLLAMA_URL` is set explicitly. |
-| `OLLAMA_HOST` | `http://localhost:{OLLAMA_PORT}` | Ollama base URL (alternative to `OLLAMA_URL`) |
-| `OLLAMA_API_KEY` | *(none)* | Optional API key for authenticated Ollama proxies. When both the key and `OLLAMA_URL` are set, `auto` uses that URL without probing local Ollama. Remote endpoints require HTTPS; HTTP is supported for loopback endpoints. |
+| `OLLAMA_HOST` | `http://localhost:{OLLAMA_PORT}` | Base URL for managed Ollama readiness checks. Authenticated embeddings use an explicitly set `OLLAMA_HOST` when `OLLAMA_URL` is unset. |
+| `OLLAMA_API_KEY` | *(none)* | Optional API key for authenticated Ollama proxies. With an explicit `OLLAMA_URL` or `OLLAMA_HOST`, `auto` uses that server without probing local Ollama. Remote endpoints require HTTPS; HTTP is supported for loopback endpoints. |
 
 ### Cloud Provider API Keys
 
