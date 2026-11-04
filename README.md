@@ -598,6 +598,8 @@ On VS Code's 2.45M‑line codebase, SocratiCode answers architectural questions 
 | [Docker](https://www.docker.com/products/docker-desktop/) | Runs Qdrant (vector DB) and by default Ollama (embeddings) | [docker.com](https://www.docker.com/products/docker-desktop/) |
 | Node.js 18.17+ with `npx` on `PATH` | Runs the MCP server | [nodejs.org](https://nodejs.org/) |
 
+On Alpine Linux ARM64, run `apk add --no-cache gcompat` so the bundled Swift parser can load.
+
 Docker must be **running** when you use the server in the default `managed` mode. 
 
 The Qdrant container is managed automatically. If you set `QDRANT_MODE=external` and point `QDRANT_URL` at a remote or cloud Qdrant instance, Docker is only needed for Ollama (embeddings) in that case.

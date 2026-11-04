@@ -242,6 +242,29 @@ describe("startQdrant", () => {
   });
 });
 
+it("keeps the configured Ollama readiness path out of Docker logs", async () => {
+  const host = "http://127.0.0.1:11435/private-proxy-path";
+  vi.resetModules();
+  vi.doMock("../../src/constants.js", async (original) => ({
+    ...await original<typeof import("../../src/constants.js")>(), OLLAMA_HOST: host,
+  }));
+  const fetch = vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(null, { status: 200 }));
+  try {
+    const { startOllama } = await import("../../src/services/docker.js");
+    const { logger } = await import("../../src/services/logger.js");
+    resolveOk(); // stopped
+    resolveOk("socraticode-ollama"); // existing container
+    resolveOk(); // docker start
+    await startOllama();
+    expect(fetch).toHaveBeenCalledWith(`${host}/api/tags`, undefined);
+    expect(logger.info).toHaveBeenCalledWith("Waiting for Ollama to be ready", { url: "http://127.0.0.1:11435" });
+  } finally {
+    fetch.mockRestore();
+    vi.doUnmock("../../src/constants.js");
+    vi.resetModules();
+  }
+});
+
 // ── ensureQdrantReady (managed mode) — readiness cache ───────────────────
 
 describe("ensureQdrantReady managed mode cache", () => {

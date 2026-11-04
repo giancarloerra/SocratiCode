@@ -93,6 +93,27 @@ describe("Ollama API-key transport", () => {
     }));
   });
 
+  it.each([401, 403])("keeps a keyed native server on port 11434 after a %i challenge", async (status) => {
+    delete process.env.OLLAMA_MODE;
+    delete process.env.OLLAMA_URL;
+    delete process.env.OLLAMA_HOST;
+    const discover = vi.fn().mockResolvedValue({ ok: false, status });
+    vi.stubGlobal("fetch", discover);
+    const dockerCheck = vi.spyOn(docker, "isDockerAvailable").mockResolvedValue(false);
+    try {
+      const provider = new OllamaEmbeddingProvider();
+      await provider.healthCheck();
+      await provider.embed(["protected native server"]);
+      expect(discover.mock.calls[0][1].headers).toBeUndefined();
+      expect(dockerCheck).not.toHaveBeenCalled();
+      expect(sdk.constructed).toHaveBeenCalledWith(expect.objectContaining({
+        host: "http://localhost:11434", headers: { Authorization: "Bearer fixture-transport-key" },
+      }));
+    } finally {
+      dockerCheck.mockRestore();
+    }
+  });
+
   it.each(["docker", "auto"])("sends managed Ollama credentials to the configured container port in %s mode", async (mode) => {
     process.env.OLLAMA_MODE = mode;
     delete process.env.OLLAMA_URL;

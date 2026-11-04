@@ -136,6 +136,23 @@ export function defaultOllamaUrl(mode: OllamaMode, apiKey: string | undefined): 
   return "http://localhost:11434";
 }
 
+/** Parse the endpoint forms supported by the Ollama SDK, including a bare host or :port. */
+export function parseOllamaUrl(host: string): URL | undefined {
+  try {
+    if (host.startsWith(":")) return new URL(`http://127.0.0.1${host}`);
+    if (host.includes("://")) return new URL(host);
+    const url = new URL(`http://${host}`);
+    if (!url.port) url.port = "11434";
+    return url;
+  } catch {
+    return undefined;
+  }
+}
+
+export function ollamaDisplayOrigin(host: string): string {
+  return parseOllamaUrl(host)?.origin ?? "(invalid Ollama endpoint)";
+}
+
 /**
  * Well-known model context lengths (in tokens).
  * Used for client-side pre-truncation to work around Ollama
@@ -413,7 +430,7 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
     embeddingProvider: _config.embeddingProvider,
     ...(embeddingProvider === "ollama" ? {
       ollamaMode: _config.ollamaMode,
-      ollamaUrl: _config.ollamaUrl,
+      ollamaUrl: ollamaDisplayOrigin(_config.ollamaUrl),
       ollamaMaxConnections: _config.ollamaMaxConnections,
     } : {}),
     ...(embeddingProvider === "lmstudio" ? {

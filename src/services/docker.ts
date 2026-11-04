@@ -16,6 +16,7 @@ import {
   QDRANT_PORT,
   QDRANT_URL,
 } from "../constants.js";
+import { ollamaDisplayOrigin } from "./embedding-config.js";
 import { logger } from "./logger.js";
 
 const execFileAsync = promisify(execFile);
@@ -388,7 +389,7 @@ export async function ensureOllamaContainerReady(onProgress?: InfraProgressCallb
  * `api-key` header for Qdrant Cloud, whose /healthz endpoint requires auth).
  */
 async function waitForService(url: string, serviceName: string, retries = 30, delayMs = 1000, init?: RequestInit): Promise<void> {
-  logger.info(`Waiting for ${serviceName} to be ready`, { url });
+  logger.info(`Waiting for ${serviceName} to be ready`, { url: serviceName === "Ollama" ? ollamaDisplayOrigin(url) : url });
   for (let i = 0; i < retries; i++) {
     try {
       const resp = await fetch(url, init);
