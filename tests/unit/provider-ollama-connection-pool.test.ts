@@ -21,6 +21,7 @@ describe("ollama connection pool", () => {
   let openSockets: Set<Socket>;
   let failNext = 0;
   let requiredAuthorization: string | undefined;
+  let rejectedStatus: number;
   let authorizations: (string | undefined)[];
   let redirectLocation: string | undefined;
   let redirectStatus: number;
@@ -29,6 +30,7 @@ describe("ollama connection pool", () => {
     opened = 0;
     failNext = 0;
     requiredAuthorization = undefined;
+    rejectedStatus = 401;
     authorizations = [];
     redirectLocation = undefined;
     redirectStatus = 307;
@@ -43,8 +45,8 @@ describe("ollama connection pool", () => {
           return;
         }
         if (requiredAuthorization && req.headers.authorization !== requiredAuthorization) {
-          res.writeHead(401, { "content-type": "application/json" });
-          res.end(JSON.stringify({ error: "Unauthorized" }));
+          res.writeHead(rejectedStatus, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "private upstream response" }));
           return;
         }
         if (failNext > 0) {
@@ -206,7 +208,8 @@ describe("ollama connection pool", () => {
     expect(authorizations).toEqual(["Bearer fixture-key-one", undefined]);
   });
 
-  it("rejects an invalid key without including it in the error", async () => {
+  it.each([401, 403])("reports HTTP %i without reflecting the key or the upstream response", async (status) => {
+    rejectedStatus = status;
     requiredAuthorization = "Bearer fixture-key-one";
     const invalidKey = "fixture-invalid-key";
     process.env.OLLAMA_API_KEY = invalidKey;
@@ -217,8 +220,17 @@ describe("ollama connection pool", () => {
       failure = error;
     }
     expect(failure).toBeInstanceOf(Error);
-    expect(String(failure)).toContain("Unauthorized");
+    expect(String(failure)).toContain(`HTTP ${status}`);
+    expect(String(failure)).not.toContain("private upstream response");
     expect(String(failure)).not.toContain(invalidKey);
+  });
+
+  it("keeps URL credentials out of the SDK request error", async () => {
+    process.env.OLLAMA_URL = `http://private-user:private-password@127.0.0.1:${port}/private-path`;
+    await expect(new OllamaEmbeddingProvider().embed(["test"])).rejects.toThrow(
+      /^Ollama cannot use credentials embedded in the URL\. Use OLLAMA_API_KEY instead\.$/,
+    );
+    expect(authorizations).toEqual([]);
   });
 
   it("rechecks readiness after the configured key changes", async () => {
@@ -229,7 +241,7 @@ describe("ollama connection pool", () => {
 
     process.env.OLLAMA_API_KEY = "fixture-invalid-key";
     resetEmbeddingConfig();
-    await expect(provider.ensureReady()).rejects.toThrow("Ollama is not reachable");
+    await expect(provider.ensureReady()).rejects.toThrow(/HTTP 401.*OLLAMA_API_KEY/);
     expect(authorizations.at(-1)).toBe("Bearer fixture-invalid-key");
   });
 

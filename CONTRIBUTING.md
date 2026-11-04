@@ -16,8 +16,8 @@ By submitting a pull request, you agree to the [Contributor License Agreement (C
 - Docker (for integration and E2E tests)
 - Git
 
-Release tools require Node.js 22.22.2 or newer in the 22.x line, 24.15 or newer
-in the 24.x line, or 26 and newer.
+Release tools and strict root development installs (`npm ci --engine-strict`) require Node.js
+22.22.2+ in 22.x, 24.15+ in 24.x, or 26+.
 
 ### Setup
 
