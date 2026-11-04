@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetEmbeddingConfig } from "../../src/services/embedding-config.js";
-import { OllamaEmbeddingProvider, resetOllamaClient, resetOllamaReadinessCache } from "../../src/services/provider-ollama.js";
+import { OllamaEmbeddingProvider, resetAutoDetectionCache, resetOllamaClient, resetOllamaReadinessCache } from "../../src/services/provider-ollama.js";
 
 const sdk = vi.hoisted(() => ({ constructed: vi.fn() }));
 vi.mock("ollama", () => ({
@@ -32,10 +32,42 @@ describe("Ollama API-key transport", () => {
     sdk.constructed.mockClear();
   });
   afterEach(() => {
+    vi.unstubAllGlobals();
+    resetAutoDetectionCache();
     resetOllamaClient();
     resetOllamaReadinessCache();
     resetEmbeddingConfig();
     process.env = { ...originalEnv };
+  });
+
+  it.each(["ensureReady", "healthCheck"] as const)("uses the configured keyed server during %s in default auto mode", async (method) => {
+    delete process.env.OLLAMA_MODE;
+    process.env.OLLAMA_URL = "https://ollama.example:11434";
+    const discover = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", discover);
+
+    await new OllamaEmbeddingProvider()[method]();
+
+    expect(sdk.constructed).toHaveBeenCalledWith(expect.objectContaining({
+      host: "https://ollama.example:11434",
+      headers: { Authorization: "Bearer fixture-transport-key" },
+    }));
+    expect(discover).not.toHaveBeenCalled();
+  });
+
+  it("still discovers native Ollama in auto mode without a key", async () => {
+    delete process.env.OLLAMA_MODE;
+    delete process.env.OLLAMA_API_KEY;
+    process.env.OLLAMA_URL = "https://ollama.example:11434";
+    const discover = vi.fn().mockResolvedValue({ ok: true });
+    vi.stubGlobal("fetch", discover);
+
+    await new OllamaEmbeddingProvider().healthCheck();
+
+    expect(discover).toHaveBeenCalledWith("http://localhost:11434/api/tags", expect.anything());
+    expect(sdk.constructed).toHaveBeenCalledWith(expect.objectContaining({
+      host: "http://localhost:11434", headers: undefined,
+    }));
   });
 
   it.each([

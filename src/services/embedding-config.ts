@@ -18,7 +18,8 @@
  *   OLLAMA_MODE:
  *     - "auto" (default): Auto-detect. If Ollama is already running natively on port 11434,
  *       use it (external mode — fastest, GPU-accelerated on Mac/Windows). Otherwise fall back
- *       to a managed Docker container on port 11435.
+ *       to a managed Docker container on port 11435. An explicit URL and API key
+ *       select that external server without probing local Ollama.
  *     - "docker": Always use a managed Docker container on port 11435.
  *     - "external": User provides their own Ollama instance (native local, remote, etc.).
  *       SocratiCode will NOT create or manage Docker containers for Ollama.
@@ -342,7 +343,9 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
       `Invalid OLLAMA_MODE: "${rawMode}". Must be "docker", "external", or "auto".`,
     );
   }
-  const ollamaMode: OllamaMode = rawMode;
+  const ollamaUrl = process.env.OLLAMA_URL;
+  const ollamaApiKey = process.env.OLLAMA_API_KEY || undefined;
+  const ollamaMode: OllamaMode = rawMode === "auto" && ollamaUrl && ollamaApiKey ? "external" : rawMode;
   const modeDefaults = MODE_DEFAULTS[ollamaMode];
 
   // ── Model & dimensions (provider-specific defaults) ─────────────────
@@ -381,7 +384,7 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
   _config = {
     embeddingProvider,
     ollamaMode,
-    ollamaUrl: process.env.OLLAMA_URL || modeDefaults.url,
+    ollamaUrl: ollamaUrl || modeDefaults.url,
     lmstudioUrl: process.env.LMSTUDIO_URL || "http://localhost:1234/v1",
     litellmUrl: process.env.LITELLM_URL || "http://localhost:4000/v1",
     allowMissingModelListing: parseBooleanEnv(
@@ -403,7 +406,7 @@ export function loadEmbeddingConfig(): EmbeddingConfig {
         })()
       : guessContextLength(embeddingModel),
     litellmSendDimensions: litellmDimensionsEnabled(process.env.LITELLM_SEND_DIMENSIONS),
-    ollamaApiKey: process.env.OLLAMA_API_KEY || undefined,
+    ollamaApiKey,
     ollamaMaxConnections,
   };
 
