@@ -52,11 +52,12 @@ async function windowsProcesses(): Promise<WindowsProcess[]> {
   const { stdout } = await execFileAsync("powershell.exe", [
     "-NoProfile", "-NonInteractive", "-Command",
     "$ErrorActionPreference = 'Stop'; Get-CimInstance Win32_Process -Property ProcessId,ParentProcessId,CreationDate | Select-Object ProcessId,ParentProcessId,CreationDate | ConvertTo-Json -Compress",
-  ], { timeout: 10_000 }).catch((cause) => {
+  ], { timeout: 30_000 }).catch((cause) => {
     const failure = cause as ExecFileException & { stdout?: string; stderr?: string };
     const details = { code: failure.code, signal: failure.signal, killed: failure.killed, stdoutBytes: Buffer.byteLength(failure.stdout ?? ""), stderr: failure.stderr };
     throw new Error(`Windows process lookup failed after ${Date.now() - started}ms: ${JSON.stringify(details)}`, { cause });
   });
+  console.error(`Windows process lookup completed in ${Date.now() - started}ms`);
   return JSON.parse(stdout);
 }
 
