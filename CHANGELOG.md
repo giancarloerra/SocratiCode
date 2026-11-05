@@ -4,6 +4,50 @@ All notable changes to SocratiCode are documented here.
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) and [Semantic Versioning](https://semver.org/).
 
 
+## [1.16.2](https://github.com/giancarloerra/socraticode/compare/v1.16.1...v1.16.2) (2026-11-05)
+
+* disable checkout credentials in new validation jobs ([fcc4d4d](https://github.com/giancarloerra/socraticode/commit/fcc4d4d15025ecd3bbbc1a7fcd2aa08f0c5f7576))
+* update packages and fix Ollama proxy authentication ([3772c41](https://github.com/giancarloerra/socraticode/commit/3772c41485ca4ab396f1102e5f5efba9b92226e5))
+
+### Bug Fixes
+
+* **graph:** bind C# aliases where declared, and type-named values by type identity ([d9b8700](https://github.com/giancarloerra/socraticode/commit/d9b870028b950f562090389eecca55f677791576))
+* **graph:** consult each C# import at its own namespace level ([e38dca3](https://github.com/giancarloerra/socraticode/commit/e38dca37b0bb68626b2f7f1266434f7c0b9e5992))
+* **graph:** keep the written C# path and look names up as C# does ([4041e70](https://github.com/giancarloerra/socraticode/commit/4041e70befa625b47a5b162dea97f2be927d1a9a)), references [#209](https://github.com/giancarloerra/socraticode/issues/209) [#208](https://github.com/giancarloerra/socraticode/issues/208)
+* **graph:** look each C# base up once ([74189a3](https://github.com/giancarloerra/socraticode/commit/74189a3c7f1e6eeb9d718e647b78b3213c45edbc))
+* **graph:** name C# declarations by their name field and capture type, creation and qualified-call edges ([d0aac8d](https://github.com/giancarloerra/socraticode/commit/d0aac8d4ca9a44433a6579bacf66fbf799c99aa6))
+* **graph:** narrow C# framework paths, skip tuple labels, keep global usings to their file ([87e2d66](https://github.com/giancarloerra/socraticode/commit/87e2d66774a02ce71737098e9d7e0f43ae570fb9))
+* **graph:** read a C# receiver that names a value as an instance call ([5c907d3](https://github.com/giancarloerra/socraticode/commit/5c907d315dd54bda47dcd6baa6374ddbf6bea371))
+* **graph:** record a C# record struct as a struct ([4dbfc01](https://github.com/giancarloerra/socraticode/commit/4dbfc01f08e7744b3496da099ca174f0465f3bf9))
+* **graph:** resolve C# names only through the scopes and imports C# uses ([692963c](https://github.com/giancarloerra/socraticode/commit/692963c274d3133a1483e7251a1ee58c551adcad))
+* normalize TypeScript configuration paths on Windows ([ceb9c7d](https://github.com/giancarloerra/socraticode/commit/ceb9c7da48744e00d4cbf69044605da2fb9338db))
+* preserve installed package bindings in workspace graphs ([8be6abb](https://github.com/giancarloerra/socraticode/commit/8be6abb4beb7841412b604780bbb40a20ca1e367))
+* preserve installed workspace links and missing-base aliases ([6653435](https://github.com/giancarloerra/socraticode/commit/6653435efaea5abd4ccfe627c48360297f22b91b))
+* preserve managed diagnostics and verify native platforms ([650b5df](https://github.com/giancarloerra/socraticode/commit/650b5dfaabc5ed4fecb26e20795de62ece117c14))
+* preserve Ollama authentication and simplify MCP test teardown ([a5bc960](https://github.com/giancarloerra/socraticode/commit/a5bc960fb7cf052fa61beb8b5aa21a81418d234c))
+* preserve Ollama policy errors and late-exit cleanup ([106bb39](https://github.com/giancarloerra/socraticode/commit/106bb3980b1b556ea504729c4d89d8bce2f38100))
+* preserve Ollama transport policy and diagnostics ([43d6afd](https://github.com/giancarloerra/socraticode/commit/43d6afd90383e610a0d0e60dcf7c995f4ea30553))
+* release model download timers and verify managed startup ([32cdff4](https://github.com/giancarloerra/socraticode/commit/32cdff4a878201e46defbf131c1c86f7f43eb914))
+* resolve monorepo imports using importer TypeScript configuration ([f22a134](https://github.com/giancarloerra/socraticode/commit/f22a134b48304cafbfa3b3b6f908a16ad7846be6))
+* **search:** name the filter when a filtered codebase_search finds nothing ([5f42476](https://github.com/giancarloerra/socraticode/commit/5f42476526f89c8c0851446602955eb6cb66d557)), closes [#207](https://github.com/giancarloerra/socraticode/issues/207)
+* use consistent native path canonicalization for graph inputs ([22cfea1](https://github.com/giancarloerra/socraticode/commit/22cfea1b797dc8a6b2a56a730a03ee1aac527bc4))
+
+### Documentation
+
+* clarify Node requirements by workflow ([1e8504b](https://github.com/giancarloerra/socraticode/commit/1e8504bf0ace5a41103e0c9cb85b8d62b60dace4))
+
+### Tests
+
+* await logging server closure before cleanup ([8dd7b8c](https://github.com/giancarloerra/socraticode/commit/8dd7b8c957d05e04094fb75eaf9fb241a1d69926))
+* bound Windows descendant cleanup ([a64101f](https://github.com/giancarloerra/socraticode/commit/a64101f30873ea8e2a6921ec3263108ed362beeb))
+* expose Windows process lookup errors ([0105edb](https://github.com/giancarloerra/socraticode/commit/0105edbb9e74b171b51979ca6996fef7271254da))
+* **graph:** pin a C# call through a lowercase namespace ([59943a5](https://github.com/giancarloerra/socraticode/commit/59943a5ce503271e6bfa748e077584b642983228))
+* keep Windows descendant fixture alive ([3d9c5b2](https://github.com/giancarloerra/socraticode/commit/3d9c5b2d5ee728a533e37fa9fd9b4cfa360746e4))
+* make compatibility fixtures portable ([b8b9d62](https://github.com/giancarloerra/socraticode/commit/b8b9d62106f31b01cee2aa24e2bd56eb208b8f0b))
+* measure Windows process lookup startup ([725000e](https://github.com/giancarloerra/socraticode/commit/725000e8789198f8d0682aaad2e328d1a34882e5))
+* remove lookup timing diagnostics ([427941c](https://github.com/giancarloerra/socraticode/commit/427941c69fa592865bd38c574ecf8f9ddf476606))
+* scope deadline mocks and configure managed endpoint ([42968e9](https://github.com/giancarloerra/socraticode/commit/42968e96c30a39d7e3bf0562f9037d4d70f78f68))
+
 ## [1.16.1](https://github.com/giancarloerra/socraticode/compare/v1.16.0...v1.16.1) (2026-10-15)
 
 ### Features

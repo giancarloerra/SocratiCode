@@ -1,6 +1,6 @@
 {
   "name": "socraticode",
-  "version": "1.16.1",
+  "version": "1.16.2",
   "description": "Codebase intelligence: semantic search workflows, dependency graph analysis, and context artifact exploration for SocratiCode",
   "author": {
     "name": "Giancarlo Erra",

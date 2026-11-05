@@ -2,7 +2,7 @@
   "name": "socraticode",
   "displayName": "SocratiCode",
   "description": "Codebase context engine for VS Code's native MCP host. Hybrid search, dependency and call graphs, symbol-level impact analysis, interactive graph explorer, and searchable architecture artefacts.",
-  "version": "1.16.1",
+  "version": "1.16.2",
   "publisher": "giancarloerra",
   "license": "AGPL-3.0-only",
   "icon": "images/icon.png",
