@@ -25,6 +25,7 @@ import {
   QDRANT_MAX_REQUEST_BYTES,
   QDRANT_UPSERT_BUDGET_BYTES,
   SYMBOL_REVERSE_SHARDS,
+  SYMBOL_SHARD_BULK_REQUEST_BYTES,
 } from "../constants.js";
 import type {
   SymbolGraphFilePayload,
@@ -212,6 +213,12 @@ function assertPointFits(point: SymgraphPoint, what: string): void {
   }
 }
 
+/** How full one upsert request may get before the next point starts a new one. */
+interface UpsertLimits {
+  budgetBytes: number;
+  maxPoints: number;
+}
+
 /**
  * Upsert points in requests bounded by BOTH a point count and a byte budget.
  *
@@ -227,6 +234,7 @@ async function upsertWithinBudget(
   collName: string,
   points: SymgraphPoint[],
   describe: (index: number) => string,
+  limits: UpsertLimits = { budgetBytes: QDRANT_UPSERT_BUDGET_BYTES, maxPoints: UPSERT_MAX_POINTS },
 ): Promise<void> {
   const qdrant = storeClient();
   let batch: SymgraphPoint[] = [];
@@ -253,7 +261,7 @@ async function upsertWithinBudget(
     // Start a new request when this point would push the body over budget, or
     // when the count cap is reached. A point larger than the budget but under
     // the ceiling ends up in a request of its own, which is what we want.
-    if (batch.length > 0 && (batchBytes + bytes > QDRANT_UPSERT_BUDGET_BYTES || batch.length >= UPSERT_MAX_POINTS)) {
+    if (batch.length > 0 && (batchBytes + bytes > limits.budgetBytes || batch.length >= limits.maxPoints)) {
       await flush();
     }
     batch.push(point);
@@ -319,23 +327,32 @@ function splitRecordByBudget<V>(
   return groups;
 }
 
+/** How one kind of shard turns a (sub)record into a point payload. */
+type ShardPayloadFor<V> = (
+  entries: Record<string, V>,
+  part: number,
+  parts: number,
+) => Record<string, unknown>;
+
 /**
- * Write a shard as one point when it fits, or as parts when it does not, and
- * remove continuation parts a previous, larger write left behind. The
- * `payloadFor` callback supplies each part's payload so name and reverse
- * shards keep their existing payload shapes exactly.
+ * Serialize one shard into the point or points that hold it. Makes no client
+ * calls, so the sequential rewrite path ({@link saveShardPoints}) and the bulk
+ * fresh-generation path ({@link saveShardsForFreshGeneration}) share a single
+ * definition of ids, payload shapes and write identity. `payloadFor` supplies
+ * each part's payload so name and reverse shards keep their existing shapes
+ * exactly.
+ *
+ * Throws {@link SymbolGraphPointTooLargeError} for an entry that cannot be
+ * placed in any part.
  */
-async function saveShardPoints<V>(
-  collName: string,
+function buildShardPoints<V>(
   primaryKey: string,
   primaryId: string,
   record: Record<string, V>,
   what: string,
-  payloadFor: (entries: Record<string, V>, part: number, parts: number) => Record<string, unknown>,
+  payloadFor: ShardPayloadFor<V>,
   generation?: string,
-): Promise<void> {
-  const qdrant = storeClient();
-
+): SymgraphPoint[] {
   const single: SymgraphPoint = {
     id: primaryId,
     vector: [0],
@@ -349,6 +366,8 @@ async function saveShardPoints<V>(
       ? [record]
       : splitRecordByBudget(record, what);
 
+  if (parts.length === 1) return [single]; // the common case: exactly the payload every graph has today
+
   // Every part of one split write carries the same random write identity. The
   // part COUNT alone cannot prove the parts belong together: continuation ids
   // are deterministic, so a rewrite that dies after part 0 leaves the previous
@@ -356,18 +375,33 @@ async function saveShardPoints<V>(
   // count-only reader would quietly merge two different writes into a record
   // equal to neither. Matching identities is what makes that detectable.
   const writeId = randomUUID();
-  const points: SymgraphPoint[] =
-    parts.length === 1
-      ? [single] // the common case: exactly the payload every graph has today
-      : parts.map((entries, i) => ({
-          id: i === 0 ? primaryId : shardPartPointId(primaryKey, i),
-          vector: [0],
-          payload: {
-            ...payloadFor(entries, i, parts.length),
-            write: writeId,
-            ...(generation ? { generation } : {}),
-          },
-        }));
+  return parts.map((entries, i) => ({
+    id: i === 0 ? primaryId : shardPartPointId(primaryKey, i),
+    vector: [0],
+    payload: {
+      ...payloadFor(entries, i, parts.length),
+      write: writeId,
+      ...(generation ? { generation } : {}),
+    },
+  }));
+}
+
+/**
+ * Write a shard as one point when it fits, or as parts when it does not, and
+ * remove continuation parts a previous, larger write left behind.
+ */
+async function saveShardPoints<V>(
+  collName: string,
+  primaryKey: string,
+  primaryId: string,
+  record: Record<string, V>,
+  what: string,
+  payloadFor: ShardPayloadFor<V>,
+  generation?: string,
+): Promise<void> {
+  const qdrant = storeClient();
+
+  const points = buildShardPoints(primaryKey, primaryId, record, what, payloadFor, generation);
 
   // How many continuation parts did the previous write leave? Read the old
   // part 0 before overwriting it; absent point or absent field both mean one.
@@ -385,9 +419,9 @@ async function saveShardPoints<V>(
 
   await upsertWithinBudget(collName, points, () => what);
 
-  if (oldParts > parts.length) {
+  if (oldParts > points.length) {
     const stale: string[] = [];
-    for (let i = Math.max(1, parts.length); i < oldParts; i++) {
+    for (let i = Math.max(1, points.length); i < oldParts; i++) {
       stale.push(shardPartPointId(primaryKey, i));
     }
     await qdrant.delete(collName, { points: stale });
@@ -753,6 +787,17 @@ export async function deleteFilePayload(
 
 // ── Name index shards ────────────────────────────────────────────────────
 
+function nameShardPayloadFor(shardKey: string): ShardPayloadFor<SymbolRef[]> {
+  return (entries, part, parts) =>
+    parts === 1
+      ? { kind: "name", shard: shardKey, nameToSymbols: entries }
+      : { kind: "name", shard: shardKey, part, parts, nameToSymbols: entries };
+}
+
+function nameShardLabel(shardKey: string): string {
+  return `name index shard '${shardKey}'`;
+}
+
 export async function saveNameShard(
   projectId: string,
   shardKey: string,
@@ -766,11 +811,8 @@ export async function saveNameShard(
     nameShardSeed(projectId, shardKey, generation),
     nameShardPointId(projectId, shardKey, generation),
     nameToSymbols,
-    `name index shard '${shardKey}'`,
-    (entries, part, parts) =>
-      parts === 1
-        ? { kind: "name", shard: shardKey, nameToSymbols: entries }
-        : { kind: "name", shard: shardKey, part, parts, nameToSymbols: entries },
+    nameShardLabel(shardKey),
+    nameShardPayloadFor(shardKey),
     generation,
   );
 }
@@ -802,6 +844,17 @@ export async function loadNameShard(
 
 // ── Reverse-call file index shards ───────────────────────────────────────
 
+function reverseShardPayloadFor(bucket: number): ShardPayloadFor<string[]> {
+  return (entries, part, parts) =>
+    parts === 1
+      ? { kind: "reverse", bucket, reverseEdges: entries }
+      : { kind: "reverse", bucket, part, parts, reverseEdges: entries };
+}
+
+function reverseShardLabel(bucket: number): string {
+  return `reverse-call index shard ${reverseShardHex(bucket)}`;
+}
+
 export async function saveReverseShard(
   projectId: string,
   bucket: number,
@@ -816,11 +869,8 @@ export async function saveReverseShard(
     revShardSeed(projectId, bucketHex, generation),
     revShardPointId(projectId, bucketHex, generation),
     reverseEdges,
-    `reverse-call index shard ${bucketHex}`,
-    (entries, part, parts) =>
-      parts === 1
-        ? { kind: "reverse", bucket, reverseEdges: entries }
-        : { kind: "reverse", bucket, part, parts, reverseEdges: entries },
+    reverseShardLabel(bucket),
+    reverseShardPayloadFor(bucket),
     generation,
   );
 }
@@ -849,6 +899,129 @@ export async function loadReverseShard(
       { projectId, bucket },
     );
   }
+}
+
+// ── Bulk shard publication for a fresh generation ────────────────────────
+
+/** Every shard of one fresh generation's index, keyed as the savers key them. */
+export interface FreshGenerationShards {
+  nameShards: ReadonlyMap<string, Record<string, SymbolRef[]>>;
+  reverseShards: ReadonlyMap<number, Record<string, string[]>>;
+}
+
+/**
+ * Generations that have already taken the fresh-generation path. A generation
+ * may take it once: a second write would hit point ids the first one filled,
+ * which is exactly the case the skipped previous-part lookup exists for.
+ */
+const freshWrittenGenerations = new Set<string>();
+
+/**
+ * Guard against using the lookup-free path on a generation that is not fresh.
+ * This is best-effort and process-local: it cannot see points another process
+ * wrote, and registering an id that already has points would pass it, so the
+ * real proof is the caller minting the id itself (persistSymbolGraph does, with
+ * randomUUID). It checks, as far as this process can know: a real id (not the legacy marker, whose point ids are the
+ * live un-generationed graph's), not the generation the committed metadata
+ * names, registered as a staging generation by the build that minted it, and
+ * not already through the fresh path.
+ */
+function assertFreshGeneration(projectId: string, generation: string): void {
+  if (!generation || generation === LEGACY_SYMBOL_GRAPH_GENERATION) {
+    throw new Error("saveShardsForFreshGeneration requires a real, newly minted generation id");
+  }
+  if (activeGenerationByProject.get(projectId) === generation) {
+    throw new Error(`Generation ${generation} is the active symbol-graph generation, not a fresh one`);
+  }
+  if (!getStagingGenerations(projectId).includes(generation)) {
+    throw new Error(`Generation ${generation} is not registered as a staging generation`);
+  }
+  if (freshWrittenGenerations.has(generation)) {
+    throw new Error(`Generation ${generation} has already been written through the fresh-generation path`);
+  }
+}
+
+/**
+ * Write every name and reverse shard of a generation that has never been
+ * written, coalescing them into requests of at most
+ * {@link UPSERT_MAX_POINTS} points and {@link SYMBOL_SHARD_BULK_REQUEST_BYTES}
+ * bytes. The byte bound is deliberately much smaller than the per-file payload
+ * budget: see its documentation for the search-latency measurement behind it.
+ * `limits` overrides both for tests and benchmarks; a byte budget above
+ * {@link QDRANT_UPSERT_BUDGET_BYTES} is clamped to it.
+ *
+ * The per-shard savers fetch each shard's previous primary point to learn how
+ * many continuation parts to delete after the write. A generation that was
+ * minted for this build has no previous points, so on a graph of ~283 shards
+ * that is ~283 reads that can only answer "nothing there", plus one write
+ * request per shard. This path skips the reads and packs the writes. It is
+ * only valid for a generation the caller has just minted and registered as
+ * staging ({@link assertFreshGeneration} enforces what it can); a rewrite of
+ * existing shards must keep using {@link saveNameShard}/{@link saveReverseShard},
+ * whose lookup is what removes stale continuation parts.
+ *
+ * Everything is serialized before the first request, so a shard that cannot be
+ * stored (see {@link SymbolGraphPointTooLargeError}) fails the whole call with
+ * nothing written. Requests then go out one after another; the first failure
+ * throws, and the caller must not publish the generation. Empty shards are
+ * skipped, as the per-shard callers always did.
+ */
+export async function saveShardsForFreshGeneration(
+  projectId: string,
+  generation: string,
+  shards: FreshGenerationShards,
+  limits: UpsertLimits = { budgetBytes: SYMBOL_SHARD_BULK_REQUEST_BYTES, maxPoints: UPSERT_MAX_POINTS },
+): Promise<void> {
+  assertFreshGeneration(projectId, generation);
+  // Consumed before any I/O: a failed attempt must not be retried on this path
+  // either, because its partial writes are exactly what the lookup would find.
+  freshWrittenGenerations.add(generation);
+
+  const collName = symgraphIndexCollectionName(projectId);
+  await ensureCollection(collName);
+
+  const points: SymgraphPoint[] = [];
+  const labels: string[] = [];
+  const add = (built: SymgraphPoint[], what: string): void => {
+    for (const point of built) {
+      points.push(point);
+      labels.push(what);
+    }
+  };
+  for (const [shardKey, record] of shards.nameShards) {
+    if (Object.keys(record).length === 0) continue;
+    add(
+      buildShardPoints(
+        nameShardSeed(projectId, shardKey, generation),
+        nameShardPointId(projectId, shardKey, generation),
+        record,
+        nameShardLabel(shardKey),
+        nameShardPayloadFor(shardKey),
+        generation,
+      ),
+      nameShardLabel(shardKey),
+    );
+  }
+  for (const [bucket, record] of shards.reverseShards) {
+    if (Object.keys(record).length === 0) continue;
+    const bucketHex = reverseShardHex(bucket);
+    add(
+      buildShardPoints(
+        revShardSeed(projectId, bucketHex, generation),
+        revShardPointId(projectId, bucketHex, generation),
+        record,
+        reverseShardLabel(bucket),
+        reverseShardPayloadFor(bucket),
+        generation,
+      ),
+      reverseShardLabel(bucket),
+    );
+  }
+
+  await upsertWithinBudget(collName, points, (i) => labels[i], {
+    ...limits,
+    budgetBytes: Math.min(limits.budgetBytes, QDRANT_UPSERT_BUDGET_BYTES),
+  });
 }
 
 // ── Generation lifecycle and coordination ───────────────────────────────
@@ -938,6 +1111,7 @@ export function unregisterStagingGeneration(projectIdOrGen: string, gen?: string
     set.delete(generation);
     if (set.size === 0) stagingGenerationsByProject.delete(projectId);
   }
+  freshWrittenGenerations.delete(generation);
 }
 
 export function getStagingGenerations(projectId: string): string[] {
@@ -1020,6 +1194,7 @@ export function hasActiveReaders(projectId: string, generation: string): boolean
 export function resetGenerationLifecycleState(): void {
   projectLocks.clear();
   stagingGenerationsByProject.clear();
+  freshWrittenGenerations.clear();
   activeReadersByProject.clear();
   deferredDeletionsByProject.clear();
   activeGenerationByProject.clear();

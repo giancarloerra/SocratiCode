@@ -34,8 +34,7 @@ vi.mock("../../src/services/symbol-graph-store.js", async (importOriginal) => {
     ...actual,
     ensureSymbolGraphCollections: vi.fn(async () => undefined),
     saveSymbolGraphMeta: vi.fn(async () => undefined),
-    saveNameShard: vi.fn(async () => undefined),
-    saveReverseShard: vi.fn(async () => undefined),
+    saveShardsForFreshGeneration: vi.fn(async () => undefined),
     deleteSymbolGraphData: vi.fn(async () => undefined),
     saveFilePayloads: vi.fn(async () => {
       if (!symbolPersistFails.value) return undefined;

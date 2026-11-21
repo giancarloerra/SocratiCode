@@ -65,8 +65,7 @@ import {
   registerStagingGeneration,
   reverseShardKeyForCallee,
   saveFilePayloads,
-  saveNameShard,
-  saveReverseShard,
+  saveShardsForFreshGeneration,
   saveSymbolGraphMeta,
   unregisterStagingGeneration,
 } from "./symbol-graph-store.js";
@@ -618,14 +617,9 @@ async function persistSymbolGraph(
     try {
       // Persist all payloads and shards into the staged generation first
       await saveFilePayloads(projectId, payloads, newGeneration);
-      for (const [shardKey, shard] of nameShards.entries()) {
-        if (Object.keys(shard).length === 0) continue;
-        await saveNameShard(projectId, shardKey, shard, newGeneration);
-      }
-      for (const [bucket, shard] of reverseShards.entries()) {
-        if (Object.keys(shard).length === 0) continue;
-        await saveReverseShard(projectId, bucket, shard, newGeneration);
-      }
+      // The generation was minted above, so its shard ids cannot exist yet: one
+      // bulk write replaces a previous-part lookup plus an upsert per shard.
+      await saveShardsForFreshGeneration(projectId, newGeneration, { nameShards, reverseShards });
 
       // Activate that generation with one metadata-pointer write only after every staged write succeeds
       const meta: SymbolGraphMeta = {
