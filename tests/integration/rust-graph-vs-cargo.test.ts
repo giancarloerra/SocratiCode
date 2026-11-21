@@ -32,13 +32,31 @@ function haveCargo(): boolean {
   }
 }
 
+/**
+ * Every dep-info file (`*.d`) cargo left under `dir`, wherever it put them.
+ *
+ * Cargo documents its build-directory layout as an internal detail, and it has
+ * moved: the new layout, always on from cargo 1.100, writes them to
+ * `target/debug/build/<package>/<hash>/out/` where they used to be in
+ * `target/debug/deps/`. Reading a fixed directory made this test fail with
+ * ENOENT on the newer cargo even though the crate compiled, so find them by
+ * extension instead.
+ */
+function depInfoFiles(dir: string): string[] {
+  const found: string[] = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) found.push(...depInfoFiles(full));
+    else if (entry.name.endsWith(".d")) found.push(full);
+  }
+  return found;
+}
+
 /** The sources rustc opened, per cargo's own dep-info, relative to the crate. */
 function sourcesRustcRead(root: string): Set<string> {
-  const deps = path.join(root, "target", "debug", "deps");
   const read = new Set<string>();
-  for (const name of fs.readdirSync(deps)) {
-    if (!name.endsWith(".d")) continue;
-    for (const line of fs.readFileSync(path.join(deps, name), "utf8").split("\n")) {
+  for (const file of depInfoFiles(path.join(root, "target", "debug"))) {
+    for (const line of fs.readFileSync(file, "utf8").split("\n")) {
       const colon = line.indexOf(":");
       if (colon === -1) continue;
       for (const raw of line.slice(colon + 1).trim().split(/\s+/)) {
