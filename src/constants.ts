@@ -155,6 +155,26 @@ export const QDRANT_MAX_REQUEST_BYTES = 33_554_432;
 export const QDRANT_UPSERT_BUDGET_BYTES = 25_165_824;
 
 /**
+ * Byte budget for one request when a fresh generation's symbol-graph shards are
+ * published in bulk. Far below {@link QDRANT_UPSERT_BUDGET_BYTES} on purpose:
+ * that budget exists to stay under the server's request ceiling, but packing
+ * shards up to it sends the same bytes as a few multi-MB requests, and on a
+ * Qdrant that is also serving searches those showed a clearly worse search p95
+ * during publication than many small requests (measured on a 18 MB synthetic
+ * graph: p95 about 11 ms with ~3 MB requests against about 3.5 ms at this
+ * budget and about 2.8 ms with one request per shard). 128 KiB keeps the bulk
+ * path's large cut in request count while keeping requests small.
+ *
+ * It bounds the summed serialized size of the points in one request, not the
+ * HTTP body: the JSON wrapper and commas add a few dozen bytes on top. It bounds
+ * coalescing, not the size of a single point: points are packed in order,
+ * whichever shard or part they belong to, and a point larger than this goes out
+ * alone while every other point shares a request with the neighbors that fit
+ * beside it.
+ */
+export const SYMBOL_SHARD_BULK_REQUEST_BYTES = 131_072;
+
+/**
  * Maximum average line length (in characters) before a file is treated as
  * minified/bundled and switched to character-based chunking. Minified files
  * have very long lines that would make line-based chunks exceed the embedding
