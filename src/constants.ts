@@ -167,9 +167,10 @@ export const QDRANT_UPSERT_BUDGET_BYTES = 25_165_824;
  *
  * It bounds the summed serialized size of the points in one request, not the
  * HTTP body: the JSON wrapper and commas add a few dozen bytes on top. It bounds
- * coalescing, not the size of a single point: a point larger than this goes out
- * alone, so every part of a split shard does except possibly the last, which
- * may be small enough to share a request with the next shard's points.
+ * coalescing, not the size of a single point: points are packed in order,
+ * whichever shard or part they belong to, and a point larger than this goes out
+ * alone while every other point shares a request with the neighbors that fit
+ * beside it.
  */
 export const SYMBOL_SHARD_BULK_REQUEST_BYTES = 131_072;
 

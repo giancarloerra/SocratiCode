@@ -305,6 +305,33 @@ describe("fresh-generation bulk shard write", () => {
     expect(await loadNameShard(PROJ, "a", gen)).toEqual(next);
   });
 
+  it("lets a small first part of a split shard share a request with the previous shard", async () => {
+    // The same rule from the other side: splitting happens between whole
+    // entries, so a small entry ahead of one that nearly fills a part becomes a
+    // small part 0. It is under the bound, so it rides with the shard before it,
+    // and the ~25 MB part 1 goes alone.
+    const gen = stage("gen-first-part");
+    const split: Record<string, SymbolRef[]> = {
+      ...nameRecordOfSize("head", 100_000),
+      ...nameRecordOfSize("big", 25_100_000),
+    };
+    const previous: Record<string, SymbolRef[]> = { alpha: [{ file: "src/a.ts", id: "src/a.ts::alpha" }] };
+    await saveShardsForFreshGeneration(PROJ, gen, {
+      nameShards: new Map([
+        ["a", previous],
+        ["g", split],
+      ]),
+      reverseShards: new Map(),
+    });
+
+    const sent = upserts.map((u) => u.payloads.map((p) => `${p.shard}:${p.part ?? 0}`));
+    expect(sent).toEqual([["a:0", "g:0"], ["g:1"]]);
+    expect(upserts[0].bytes).toBeLessThanOrEqual(SYMBOL_SHARD_BULK_REQUEST_BYTES + 100);
+    expect(retrieves).toHaveLength(0);
+    expect(await loadNameShard(PROJ, "a", gen)).toEqual(previous);
+    expect(await loadNameShard(PROJ, "g", gen)).toEqual(split);
+  });
+
   it("clamps an override above the per-file payload budget to that budget", async () => {
     const gen = stage("gen-clamp");
     const nameShards = new Map<string, Record<string, SymbolRef[]>>();

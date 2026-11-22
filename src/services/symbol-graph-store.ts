@@ -235,11 +235,12 @@ interface UpsertLimits {
  * request ({@link pointBytes}), not the HTTP body. The body is
  * `{"points":[` + the points + `]}` with a comma between points, so it runs a
  * few dozen bytes over the budget at the 50-point cap. Points are packed in
- * order and the packer knows nothing about shards: a point larger than the
- * budget goes alone (the batch before it is flushed, and the next point starts
- * a new one), while any point under the budget may share a request with its
- * neighbors, including the small last part of a split shard and the first
- * point of whatever shard follows it.
+ * order and the packer knows nothing about shards or parts: a point larger
+ * than the budget goes alone (the batch before it is flushed, and the next
+ * point starts a new one), and any other point shares a request with whichever
+ * neighbors in that order fit beside it. A split shard's parts are not special:
+ * a small part next to a part that fills the budget can share a request with
+ * the points on its other side, whether those belong to another shard or not.
  */
 async function upsertWithinBudget(
   collName: string,
@@ -957,10 +958,10 @@ function assertFreshGeneration(projectId: string, generation: string): void {
  * written, coalescing their points into requests of at most
  * {@link UPSERT_MAX_POINTS} points whose serialized points total at most
  * {@link SYMBOL_SHARD_BULK_REQUEST_BYTES} bytes (the HTTP body adds the JSON
- * wrapper and commas on top; see {@link upsertWithinBudget}). A point larger
- * than that goes in a request of its own, so each part of a split shard is
- * alone except possibly the last, which can be small enough to share a request
- * with the next shard's points. The byte bound is deliberately much smaller than
+ * wrapper and commas on top; see {@link upsertWithinBudget}). Points are packed
+ * in order, whichever shard or part they belong to: a point larger than that
+ * goes in a request of its own and every other point shares one with the
+ * neighbors that fit beside it. The byte bound is deliberately much smaller than
  * the per-file payload budget: see its documentation for the search-latency
  * measurement behind it. `limits` overrides both bounds for tests and
  * benchmarks; a byte budget above {@link QDRANT_UPSERT_BUDGET_BYTES} is
