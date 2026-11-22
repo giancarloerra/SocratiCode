@@ -26,6 +26,8 @@ interface UpsertRequest {
   collName: string;
   points: number;
   bytes: number;
+  /** The payload of every point in the request, in order. */
+  payloads: Array<Record<string, unknown>>;
 }
 
 const store = new Map<string, Map<string, StoredPoint>>(); // collection -> id -> point
@@ -58,6 +60,7 @@ vi.mock("../../src/services/qdrant.js", () => ({
           collName: name,
           points: body.points.length,
           bytes: Buffer.byteLength(JSON.stringify(body), "utf-8"),
+          payloads: body.points.map((p) => p.payload),
         });
         const coll = store.get(name) ?? new Map<string, StoredPoint>();
         for (const p of body.points) coll.set(String(p.id), p);
@@ -242,7 +245,9 @@ describe("fresh-generation bulk shard write", () => {
     await saveShardsForFreshGeneration(PROJ, gen, { nameShards, reverseShards: new Map() });
 
     expect(retrieves).toHaveLength(0);
-    // Body = points + `{"points":[` + `]}` + commas, so allow a small envelope.
+    // The bound counts the serialized points; the body adds `{"points":[` and
+    // `]}` and a comma between points (at most 13 + 49 bytes at 50 points), so
+    // allow a small envelope on top.
     expect(upserts.every((u) => u.bytes <= SYMBOL_SHARD_BULK_REQUEST_BYTES + 100)).toBe(true);
     expect(upserts.length).toBeGreaterThan(2); // more than the 50-point cap alone would give
     expect(upserts.length).toBeLessThan(keys.length); // still coalesced, not one per shard
@@ -269,6 +274,35 @@ describe("fresh-generation bulk shard write", () => {
     for (const key of nameShards.keys()) {
       expect(await loadNameShard(PROJ, key, gen)).toEqual(nameShards.get(key));
     }
+  });
+
+  it("lets a small final part of a split shard share a request with the next shard", async () => {
+    // The packer works on points, not shards. `big` nearly fills a part (the
+    // part budget is QDRANT_UPSERT_BUDGET_BYTES less 1 KiB of envelope) and
+    // `tail` cannot join it, so the shard splits into a ~25 MB part 0 and a
+    // ~100 KB final part. Part 0 is over the bound and goes alone; the final
+    // part is under it, so it rides with the next shard's point.
+    const gen = stage("gen-final-part");
+    const split: Record<string, SymbolRef[]> = {
+      ...nameRecordOfSize("big", 25_100_000),
+      ...nameRecordOfSize("tail", 100_000),
+    };
+    const next: Record<string, SymbolRef[]> = { alpha: [{ file: "src/a.ts", id: "src/a.ts::alpha" }] };
+    await saveShardsForFreshGeneration(PROJ, gen, {
+      nameShards: new Map([
+        ["g", split],
+        ["a", next],
+      ]),
+      reverseShards: new Map(),
+    });
+
+    const sent = upserts.map((u) => u.payloads.map((p) => `${p.shard}:${p.part ?? 0}`));
+    expect(sent).toEqual([["g:0"], ["g:1", "a:0"]]);
+    expect(upserts[1].bytes).toBeLessThanOrEqual(SYMBOL_SHARD_BULK_REQUEST_BYTES + 100);
+    expect(retrieves).toHaveLength(0);
+    // Sharing a request changes nothing about identity: both read back whole.
+    expect(await loadNameShard(PROJ, "g", gen)).toEqual(split);
+    expect(await loadNameShard(PROJ, "a", gen)).toEqual(next);
   });
 
   it("clamps an override above the per-file payload budget to that budget", async () => {
@@ -354,6 +388,45 @@ describe("fresh-generation bulk shard write", () => {
     expect(err).toBeInstanceOf(SymbolGraphPointTooLargeError);
     expect((err as Error).message).toContain("name index shard 'h'");
     // Serialized up front: the valid shards in the same call were not written either.
+    expect(upserts).toHaveLength(0);
+    expect(pointsInIndex()).toHaveLength(0);
+  });
+
+  it("yields to the event loop between shards while serializing, and still writes nothing when a later shard is invalid", async () => {
+    // Serializing every shard before the first request is CPU work the
+    // per-shard savers never did in one go (they awaited I/O between shards), so
+    // other callbacks must get to run during it. A callback queued before the
+    // call stands in for another request; the invalid last shard reports, via a
+    // trap on its keys, whether that callback had run by the time the pass
+    // reached it. Without a yield the whole pass is synchronous and it had not.
+    const gen = stage("gen-yield");
+    let ticked = false;
+    let tickedBeforeLastShard: boolean | undefined;
+    const invalidLast = new Proxy<Record<string, SymbolRef[]>>(
+      { huge: refsFor("huge", 160_000, 100) },
+      {
+        ownKeys(target) {
+          tickedBeforeLastShard ??= ticked;
+          return Reflect.ownKeys(target);
+        },
+      },
+    );
+    const shards: FreshGenerationShards = {
+      nameShards: new Map([
+        ["a", { alpha: [{ file: "src/a.ts", id: "src/a.ts::alpha" }] }],
+        ["b", { beta: [{ file: "src/b.ts", id: "src/b.ts::beta" }] }],
+        ["h", invalidLast],
+      ]),
+      reverseShards: new Map(),
+    };
+
+    setImmediate(() => {
+      ticked = true;
+    });
+    await expect(saveShardsForFreshGeneration(PROJ, gen, shards)).rejects.toThrow(SymbolGraphPointTooLargeError);
+
+    expect(tickedBeforeLastShard).toBe(true);
+    // The valid shards ahead of it were not written either.
     expect(upserts).toHaveLength(0);
     expect(pointsInIndex()).toHaveLength(0);
   });

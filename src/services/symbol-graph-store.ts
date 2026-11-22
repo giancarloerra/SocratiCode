@@ -15,6 +15,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { QdrantClient } from "@qdrant/js-client-rest";
 import {
   symgraphFileCollectionName,
@@ -229,6 +230,16 @@ interface UpsertLimits {
  * is rejected with HTTP 400. Packing by bytes keeps every request under the
  * ceiling regardless of how large individual files are; the count cap is kept
  * so ordinary repos still batch exactly as before.
+ *
+ * What the byte budget counts: the summed serialized size of the points in the
+ * request ({@link pointBytes}), not the HTTP body. The body is
+ * `{"points":[` + the points + `]}` with a comma between points, so it runs a
+ * few dozen bytes over the budget at the 50-point cap. Points are packed in
+ * order and the packer knows nothing about shards: a point larger than the
+ * budget goes alone (the batch before it is flushed, and the next point starts
+ * a new one), while any point under the budget may share a request with its
+ * neighbors, including the small last part of a split shard and the first
+ * point of whatever shard follows it.
  */
 async function upsertWithinBudget(
   collName: string,
@@ -943,12 +954,17 @@ function assertFreshGeneration(projectId: string, generation: string): void {
 
 /**
  * Write every name and reverse shard of a generation that has never been
- * written, coalescing them into requests of at most
- * {@link UPSERT_MAX_POINTS} points and {@link SYMBOL_SHARD_BULK_REQUEST_BYTES}
- * bytes. The byte bound is deliberately much smaller than the per-file payload
- * budget: see its documentation for the search-latency measurement behind it.
- * `limits` overrides both for tests and benchmarks; a byte budget above
- * {@link QDRANT_UPSERT_BUDGET_BYTES} is clamped to it.
+ * written, coalescing their points into requests of at most
+ * {@link UPSERT_MAX_POINTS} points whose serialized points total at most
+ * {@link SYMBOL_SHARD_BULK_REQUEST_BYTES} bytes (the HTTP body adds the JSON
+ * wrapper and commas on top; see {@link upsertWithinBudget}). A point larger
+ * than that goes in a request of its own, so each part of a split shard is
+ * alone except possibly the last, which can be small enough to share a request
+ * with the next shard's points. The byte bound is deliberately much smaller than
+ * the per-file payload budget: see its documentation for the search-latency
+ * measurement behind it. `limits` overrides both bounds for tests and
+ * benchmarks; a byte budget above {@link QDRANT_UPSERT_BUDGET_BYTES} is
+ * clamped to it.
  *
  * The per-shard savers fetch each shard's previous primary point to learn how
  * many continuation parts to delete after the write. A generation that was
@@ -962,7 +978,10 @@ function assertFreshGeneration(projectId: string, generation: string): void {
  *
  * Everything is serialized before the first request, so a shard that cannot be
  * stored (see {@link SymbolGraphPointTooLargeError}) fails the whole call with
- * nothing written. Requests then go out one after another; the first failure
+ * nothing written. That pass is CPU work on every shard (the per-shard savers
+ * yielded for I/O between shards, this one would not), so it yields to the event
+ * loop after each shard; the first request still waits until every shard has
+ * been serialized. Requests then go out one after another; the first failure
  * throws, and the caller must not publish the generation. Empty shards are
  * skipped, as the per-shard callers always did.
  */
@@ -1001,6 +1020,7 @@ export async function saveShardsForFreshGeneration(
       ),
       nameShardLabel(shardKey),
     );
+    await yieldToEventLoop();
   }
   for (const [bucket, record] of shards.reverseShards) {
     if (Object.keys(record).length === 0) continue;
@@ -1016,6 +1036,7 @@ export async function saveShardsForFreshGeneration(
       ),
       reverseShardLabel(bucket),
     );
+    await yieldToEventLoop();
   }
 
   await upsertWithinBudget(collName, points, (i) => labels[i], {
