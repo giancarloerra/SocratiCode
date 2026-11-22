@@ -241,12 +241,17 @@ interface UpsertLimits {
  * neighbors in that order fit beside it. A split shard's parts are not special:
  * a small part next to a part that fills the budget can share a request with
  * the points on its other side, whether those belong to another shard or not.
+ *
+ * `knownBytes`, when given, holds each point's serialized size (parallel to
+ * `points`), so a caller that can yield between points sizes them where it
+ * yields; otherwise each size is computed here, between awaited requests.
  */
 async function upsertWithinBudget(
   collName: string,
   points: SymgraphPoint[],
   describe: (index: number) => string,
   limits: UpsertLimits = { budgetBytes: QDRANT_UPSERT_BUDGET_BYTES, maxPoints: UPSERT_MAX_POINTS },
+  knownBytes?: readonly number[],
 ): Promise<void> {
   const qdrant = storeClient();
   let batch: SymgraphPoint[] = [];
@@ -261,7 +266,7 @@ async function upsertWithinBudget(
 
   for (let i = 0; i < points.length; i++) {
     const point = points[i];
-    const bytes = pointBytes(point);
+    const bytes = knownBytes?.[i] ?? pointBytes(point);
     if (bytes > QDRANT_MAX_REQUEST_BYTES) {
       // Deliberately abandon the queued batch rather than flushing it first.
       // This throw aborts persistSymbolGraph, so the run's metadata is never
@@ -1002,10 +1007,16 @@ export async function saveShardsForFreshGeneration(
 
   const points: SymgraphPoint[] = [];
   const labels: string[] = [];
+  // Each point is sized here, in the pass that yields to the event loop after
+  // every shard, so the packer below does no serialization of its own: sizing
+  // it there would stringify two consecutive multi-MB points before the first
+  // request returned control.
+  const sizes: number[] = [];
   const add = (built: SymgraphPoint[], what: string): void => {
     for (const point of built) {
       points.push(point);
       labels.push(what);
+      sizes.push(pointBytes(point));
     }
   };
   for (const [shardKey, record] of shards.nameShards) {
@@ -1040,10 +1051,13 @@ export async function saveShardsForFreshGeneration(
     await yieldToEventLoop();
   }
 
-  await upsertWithinBudget(collName, points, (i) => labels[i], {
-    ...limits,
-    budgetBytes: Math.min(limits.budgetBytes, QDRANT_UPSERT_BUDGET_BYTES),
-  });
+  await upsertWithinBudget(
+    collName,
+    points,
+    (i) => labels[i],
+    { ...limits, budgetBytes: Math.min(limits.budgetBytes, QDRANT_UPSERT_BUDGET_BYTES) },
+    sizes,
+  );
 }
 
 // ── Generation lifecycle and coordination ───────────────────────────────

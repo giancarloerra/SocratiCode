@@ -458,6 +458,39 @@ describe("fresh-generation bulk shard write", () => {
     expect(pointsInIndex()).toHaveLength(0);
   });
 
+  it("sizes every point before the first request, so the packer serializes nothing between requests", async () => {
+    // Sizing a point means serializing it. That belongs in the preflight, which
+    // yields to the event loop after each shard, and not in the packer, which
+    // would otherwise serialize the next multi-MB point right after the previous
+    // request returns. Three ~7 MB shards (each over the bound, so each its own
+    // request) make the difference visible: count point serializations, and
+    // compare the count when the first request body is built with the final one.
+    const gen = stage("gen-sizing");
+    const nameShards = new Map<string, Record<string, SymbolRef[]>>();
+    for (const key of ["a", "b", "c"]) nameShards.set(key, nameRecordOfSize(`${key}Big`, 7_000_000));
+
+    const realStringify = JSON.stringify as (...args: unknown[]) => string;
+    let pointSerializations = 0;
+    let atFirstRequest: number | undefined;
+    const spy = vi.spyOn(JSON, "stringify").mockImplementation(((...args: unknown[]) => {
+      const value = args[0];
+      if (value && typeof value === "object") {
+        if ("vector" in value) pointSerializations++;
+        else if ("points" in value) atFirstRequest ??= pointSerializations; // the fake client building a request body
+      }
+      return realStringify.apply(JSON, args);
+    }) as typeof JSON.stringify);
+    try {
+      await saveShardsForFreshGeneration(PROJ, gen, { nameShards, reverseShards: new Map() });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(upserts).toHaveLength(3);
+    expect(atFirstRequest).toBeDefined();
+    expect(pointSerializations).toBe(atFirstRequest);
+  });
+
   it("stops at the first failed request and sends nothing after it", async () => {
     const gen = stage("gen-fail");
     failUpsertAt = 2;
