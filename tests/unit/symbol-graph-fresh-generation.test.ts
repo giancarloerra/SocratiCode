@@ -129,8 +129,12 @@ function nameRecordOfSize(tag: string, bytes: number): Record<string, SymbolRef[
   return { [tag]: [{ file: "src/a.ts", id: `src/a.ts::${"y".repeat(bytes)}` }] };
 }
 
-/** One tiny record per name key and per reverse bucket. */
-function smallShards(): FreshGenerationShards {
+/**
+ * One tiny record per name key and per reverse bucket. The return type is
+ * inferred on purpose: it keeps the maps mutable, so a test can add a shard
+ * before passing the result as a (read-only) FreshGenerationShards.
+ */
+function smallShards() {
   const nameShards = new Map<string, Record<string, SymbolRef[]>>();
   for (const key of allNameShardKeys()) {
     nameShards.set(key, { [`${key}fn`]: [{ file: "src/a.ts", id: `src/a.ts::${key}fn` }] });
@@ -214,7 +218,7 @@ describe("fresh-generation bulk shard write", () => {
   it("skips empty shards, as the per-shard callers always did", async () => {
     const gen = stage("gen-empty");
     await saveShardsForFreshGeneration(PROJ, gen, {
-      nameShards: new Map([
+      nameShards: new Map<string, Record<string, SymbolRef[]>>([
         ["a", { alpha: [{ file: "src/a.ts", id: "src/a.ts::alpha" }] }],
         ["b", {}],
       ]),
