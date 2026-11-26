@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2026 Giancarlo Erra - Altaire Limited
 import { Worker } from "node:worker_threads";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SymbolGraphFilePayload } from "../../src/types.js";
 
 /**
@@ -19,7 +19,7 @@ describe("symbol-graph store: requests on a connection closed during a slow step
   let server: Worker;
   let nextId = 0;
   let store: typeof import("../../src/services/symbol-graph-store.js");
-  let describeQdrantError: typeof import("../../src/services/qdrant.js").describeQdrantError;
+  let qdrant: typeof import("../../src/services/qdrant.js");
 
   function ask<T>(msg: Record<string, unknown>): Promise<T> {
     const id = ++nextId;
@@ -53,7 +53,7 @@ describe("symbol-graph store: requests on a connection closed during a slow step
     const { port } = await new Promise<{ port: number }>((resolve) => server.once("message", resolve));
     process.env.QDRANT_URL = `http://127.0.0.1:${port}`;
     store = await import("../../src/services/symbol-graph-store.js");
-    ({ describeQdrantError } = await import("../../src/services/qdrant.js"));
+    qdrant = await import("../../src/services/qdrant.js");
   });
 
   afterAll(async () => {
@@ -67,12 +67,45 @@ describe("symbol-graph store: requests on a connection closed during a slow step
     store.resetSymbolGraphCollectionCache();
   });
 
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   const payload = (version: string): SymbolGraphFilePayload => ({
     file: "src/a.ts",
     language: "typescript",
     contentHash: version,
     symbols: [],
     outgoingCalls: [],
+  });
+
+  function transportError(code: string): TypeError {
+    return new TypeError("fetch failed", { cause: Object.assign(new Error(code), { code }) });
+  }
+
+  it.each(["EPIPE", "ECONNRESET"])("replays the same upsert once after %s and persists the payload", async (code) => {
+    const upsert = vi.spyOn(qdrant.getClient(), "upsert").mockRejectedValueOnce(transportError(code));
+    const expected = payload("v1");
+    await store.saveFilePayloads("p", [expected], "g1");
+    expect(upsert).toHaveBeenCalledTimes(2);
+    expect(upsert.mock.calls[1]).toEqual(upsert.mock.calls[0]);
+    expect(await store.loadFilePayload("p", expected.file, "g1")).toEqual(expected);
+  });
+
+  it.each(["EPIPE", "ECONNRESET"])("propagates the second %s failure unchanged", async (code) => {
+    const second = transportError(code);
+    const upsert = vi.spyOn(qdrant.getClient(), "upsert")
+      .mockRejectedValueOnce(transportError(code))
+      .mockRejectedValueOnce(second);
+    await expect(store.saveFilePayloads("p", [payload("v1")], "g1")).rejects.toBe(second);
+    expect(upsert).toHaveBeenCalledTimes(2);
+  });
+
+  it("propagates a refused connection on the first attempt", async () => {
+    const refused = transportError("ECONNREFUSED");
+    const upsert = vi.spyOn(qdrant.getClient(), "upsert").mockRejectedValueOnce(refused);
+    await expect(store.saveFilePayloads("p", [payload("v1")], "g1")).rejects.toBe(refused);
+    expect(upsert).toHaveBeenCalledTimes(1);
   });
 
   it("retries an upsert sent after the slow step, and stores the payload", async () => {
@@ -104,7 +137,7 @@ describe("symbol-graph store: requests on a connection closed during a slow step
       (e: unknown) => e,
     );
     expect(err, "second consecutive close must reject").not.toBeNull();
-    expect(describeQdrantError(err)).toBe("fetch failed: other side closed [UND_ERR_SOCKET]");
+    expect(qdrant.describeQdrantError(err)).toBe("fetch failed: other side closed [UND_ERR_SOCKET]");
   });
 
   it("does not retry a request the server answered with an error", async () => {

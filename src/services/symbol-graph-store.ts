@@ -36,11 +36,12 @@ import type {
 import { logger } from "./logger.js";
 import { getClient, isAlreadyExistsError } from "./qdrant.js";
 
-/** True when the error's cause chain holds undici's closed-socket error. */
+/** True when the error's cause chain holds a closed-socket error from undici or Node. */
 function isClosedSocketError(err: unknown): boolean {
   let current: unknown = err;
   for (let depth = 0; depth < 5 && current; depth++) {
-    if ((current as { code?: unknown }).code === "UND_ERR_SOCKET") return true;
+    const code = (current as { code?: unknown }).code;
+    if (code === "UND_ERR_SOCKET" || code === "EPIPE" || code === "ECONNRESET") return true;
     current = (current as { cause?: unknown }).cause;
   }
   return false;
